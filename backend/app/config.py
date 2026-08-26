@@ -56,8 +56,10 @@ class Settings(BaseSettings):
     # ── Search ───────────────────────────────────────────────
     candidate_pool_size: int = 60
     top_connections: int = 20
+    min_match_score: float = 12.0          # drop incidental / weak matches (spec §38)
     llm_query_interpretation: bool = True  # False -> deterministic query parser only
     llm_reason_generation: bool = True     # False -> deterministic reason templates
+    llm_reason_top_n: int = 8              # LLM reasons for the top N; template for the rest
 
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

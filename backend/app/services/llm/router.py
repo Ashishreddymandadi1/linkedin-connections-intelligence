@@ -25,7 +25,7 @@ log = logging.getLogger("app.llm.router")
 
 T = TypeVar("T", bound=BaseModel)
 
-_MAX_BACKOFF = 8.0
+_MAX_BACKOFF = 5.0
 
 
 def _sleep(seconds: float) -> None:
