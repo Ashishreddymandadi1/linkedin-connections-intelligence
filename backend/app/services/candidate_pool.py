@@ -20,7 +20,13 @@ from app.services.matching import norm
 
 log = logging.getLogger("app.candidates")
 
-_SCORABLE = (EnrichmentState.READY, EnrichmentState.PARTIAL)
+# WAITING_FOR_FREE_LLM profiles are fully scraped + normalized + embedded — only
+# the optional semantic keywords are missing, so they are still searchable.
+_SCORABLE = (
+    EnrichmentState.READY,
+    EnrichmentState.PARTIAL,
+    EnrichmentState.WAITING_FOR_FREE_LLM,
+)
 
 
 def get_candidates(

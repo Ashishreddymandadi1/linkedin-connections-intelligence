@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.constants import EnrichmentState
@@ -93,17 +93,37 @@ def list_people(db: Session, dataset_id: str, *, is_connection: bool | None = Tr
     return list(db.scalars(stmt.order_by(Person.full_name)))
 
 
-def people_needing_enrichment(db: Session, dataset_id: str) -> list[Person]:
+def people_needing_enrichment(db: Session, dataset_id: str, *, defer_waiting: bool = True) -> list[Person]:
+    """Non-terminal people. WAITING_FOR_FREE_LLM is sorted LAST so a rate-limited
+    semantic step never blocks the rest of the pipeline (spec §25, §54)."""
     stmt = (
         select(Person)
         .where(Person.dataset_id == dataset_id)
         .where(Person.enrichment_state.notin_(list(_TERMINAL)))
-        .order_by(Person.created_at)
     )
+    if defer_waiting:
+        waiting_last = case((Person.enrichment_state == EnrichmentState.WAITING_FOR_FREE_LLM, 1), else_=0)
+        stmt = stmt.order_by(waiting_last, Person.created_at)
+    else:
+        stmt = stmt.order_by(Person.created_at)
     return list(db.scalars(stmt))
 
 
 _TERMINAL = {EnrichmentState.READY, EnrichmentState.PARTIAL, EnrichmentState.FAILED}
+
+
+def people_missing_semantics(db: Session, dataset_id: str) -> list[Person]:
+    """READY/PARTIAL people whose semantic pass never completed (deferred during a
+    rate-limited run) — picked up by a resume / backfill."""
+    return list(
+        db.scalars(
+            select(Person)
+            .where(Person.dataset_id == dataset_id)
+            .where(Person.enrichment_state.in_([EnrichmentState.READY, EnrichmentState.PARTIAL]))
+            .where(Person.semantic_version.is_(None))
+            .order_by(Person.created_at)
+        )
+    )
 
 
 def enrichment_state_counts(db: Session, dataset_id: str) -> dict[str, int]:

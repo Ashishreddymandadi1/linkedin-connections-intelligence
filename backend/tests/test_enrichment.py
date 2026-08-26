@@ -89,6 +89,31 @@ def test_enrichment_is_resumable(client):
     assert raw_before == 4
 
 
+def test_rate_limited_semantics_does_not_stall_the_run(client, monkeypatch):
+    """Regression: WAITING_FOR_FREE_LLM profiles must not block the queue —
+    the run must still scrape + normalize + embed every profile."""
+    monkeypatch.setattr("app.config.settings.semantic_enabled", True)
+    monkeypatch.setattr("app.services.enrichment_runner._RunContext._MAX_CONSECUTIVE_LLM_FAILS", 2)
+
+    def always_exhausted(db, person):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("app.services.semantic_llm.derive_semantics", always_exhausted)
+
+    ds_id = _upload(client)
+    client.post(f"/datasets/{ds_id}/enrich")
+
+    status = client.get(f"/datasets/{ds_id}/status").json()
+    # every profile reached a searchable terminal state — none stuck mid-pipeline
+    assert status["pending"] == 0
+    assert status["ready"] + status["partial"] >= 10
+
+    # and they are searchable despite missing semantics
+    r = client.post("/search", json={"dataset_id": ds_id, "query": "worked at Amazon"})
+    assert r.status_code == 200
+    assert r.json()["connections"]["returned"] >= 1
+
+
 def test_partial_when_scrape_has_no_sections(client, monkeypatch):
     from app.services import apify_client
 

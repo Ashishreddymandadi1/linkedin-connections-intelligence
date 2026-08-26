@@ -92,6 +92,9 @@ def _scrape_fixtures(urls: list[str], hints: dict[str, dict] | None) -> list[dic
 def _scrape_apify(urls: list[str]) -> list[dict]:
     if not settings.apify_api_token:
         raise ApifyError("APIFY_API_TOKEN is not set")
+    from datetime import timedelta
+    from decimal import Decimal
+
     from apify_client import ApifyClient
 
     client = ApifyClient(settings.apify_api_token)
@@ -99,13 +102,63 @@ def _scrape_apify(urls: list[str]) -> list[dict]:
         "profileScraperMode": settings.apify_profile_scraper_mode,
         "queries": urls,
     }
-    log.info("apify run: actor=%s profiles=%d mode=%s", settings.apify_actor_id, len(urls), settings.apify_profile_scraper_mode)
-    run = client.actor(settings.apify_actor_id).call(run_input=run_input, timeout_secs=600)
-    if not run or run.get("status") != "SUCCEEDED":
-        raise ApifyError(f"apify run did not succeed: {run.get('status') if run else 'no run'}")
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-    log.info("apify run %s returned %d items", run.get("id"), len(items))
+    # hard cost cap per batch: expected + 3x headroom + small buffer
+    charge_cap = Decimal(str(round(len(urls) * 0.004 * 3 + 0.05, 4)))
+    log.info(
+        "apify run: actor=%s profiles=%d mode=%s cap=$%s",
+        settings.apify_actor_id,
+        len(urls),
+        settings.apify_profile_scraper_mode,
+        charge_cap,
+    )
+    try:
+        run = client.actor(settings.apify_actor_id).call(
+            run_input=run_input,
+            run_timeout=timedelta(seconds=600),
+            max_total_charge_usd=charge_cap,
+        )
+    except Exception as e:  # noqa: BLE001 — normalize any client error
+        raise ApifyError(f"apify call failed: {e}") from e
+
+    status = _run_attr(run, "status")
+    dataset_id = _run_attr(run, "default_dataset_id") or _run_attr(run, "defaultDatasetId")
+    run_id = _run_attr(run, "id")
+    if status not in ("SUCCEEDED", "SUCCEEDED_WITH_WARNINGS") or not dataset_id:
+        raise ApifyError(f"apify run did not succeed: status={status}")
+
+    raw_items = list(client.dataset(dataset_id).iterate_items())
+    items = [_clean_item(it) for it in raw_items if _is_profile(it)]
+    log.info("apify run %s: %d raw items -> %d usable profiles", run_id, len(raw_items), len(items))
     return items
+
+
+def _run_attr(run, name: str):
+    if run is None:
+        return None
+    if isinstance(run, dict):
+        return run.get(name)
+    return getattr(run, name, None)
+
+
+def _is_profile(item: dict) -> bool:
+    """Skip the actor's error rows (e.g. {"element": null, "status": 404})."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("error") or item.get("status") in (403, 404, 429, 500):
+        return False
+    body = item.get("element") if isinstance(item.get("element"), dict) else item
+    return bool(body and (body.get("publicIdentifier") or body.get("linkedinUrl") or body.get("firstName")))
+
+
+def _clean_item(item: dict) -> dict:
+    """HarvestAPI sometimes wraps the profile in `element` — unwrap it, keep the
+    query so callers can match it back to the requested URL."""
+    if isinstance(item.get("element"), dict):
+        merged = dict(item["element"])
+        if item.get("query") and not merged.get("query"):
+            merged["_query"] = item["query"]
+        return merged
+    return item
 
 
 def scrape_profiles(urls: list[str], *, hints: dict[str, dict] | None = None) -> list[dict]:

@@ -46,6 +46,45 @@ def start_enrichment(dataset_id: str, job_id: str) -> None:
         db.close()
 
 
+def backfill_semantics(dataset_id: str, job_id: str | None = None) -> None:
+    """Background task: run the semantic pass for READY people that were deferred
+    during a rate-limited run. Re-embeds so the new keywords land in search."""
+    db = SessionLocal()
+    try:
+        from app.services.semantic_enrich import enrich_person_semantics
+
+        ctx = _RunContext()
+        people = repo.people_missing_semantics(db, dataset_id)
+        log.info("semantic backfill: %d profiles for dataset %s", len(people), dataset_id)
+        done = 0
+        for p in people:
+            if ctx.semantic_disabled:
+                break
+            prev_state = p.enrichment_state
+            p.enrichment_state = EnrichmentState.NORMALIZED  # let the semantic step run
+            enrich_person_semantics(db, p)
+            if p.enrichment_state == EnrichmentState.WAITING_FOR_FREE_LLM:
+                ctx.note_llm_failure()
+                p.enrichment_state = prev_state  # leave as-is, still searchable
+            else:
+                ctx.note_llm_success()
+                _embedding_step(db, p)
+                _mark_ready_or_partial(db, p)
+                done += 1
+            db.commit()
+        job = db.get(EnrichmentJob, job_id) if job_id else None
+        if job:
+            job.status = JobStatus.COMPLETED if not ctx.semantic_disabled else JobStatus.PARTIAL
+            job.completed_profiles = done
+            job.completed_at = utcnow()
+            db.commit()
+        log.info("semantic backfill done: %d completed, breaker=%s", done, ctx.semantic_disabled)
+    except Exception:  # noqa: BLE001
+        log.exception("semantic backfill crashed for %s", dataset_id)
+    finally:
+        db.close()
+
+
 def refresh_single_person(db: Session, person_id: str, *, force: bool = False) -> dict:
     person = repo.get_person(db, person_id)
     if not person:
@@ -81,10 +120,15 @@ def _run(db: Session, dataset_id: str, job_id: str) -> None:
     db.commit()
 
     batch_size = max(1, settings.effective_batch_size)
+    # Run-scoped semantic circuit breaker: after this many consecutive
+    # free-LLM failures, stop attempting the semantic step for the rest of the
+    # run (profiles still get scraped + normalized + embedded + marked READY;
+    # their semantic_version stays NULL for a later backfill / resume).
+    ctx = _RunContext()
     guard = 0
     while True:
         guard += 1
-        if guard > 10_000:
+        if guard > 20_000:
             log.error("enrichment loop guard tripped for %s", dataset_id)
             break
 
@@ -101,7 +145,7 @@ def _run(db: Session, dataset_id: str, job_id: str) -> None:
         progressed = False
         for p in batch:
             before = p.enrichment_state
-            _drive_to_ready(db, p)
+            _drive_to_ready(db, p, ctx)
             db.commit()
             progressed = progressed or (p.enrichment_state != before)
             if p.enrichment_state in (EnrichmentState.READY, EnrichmentState.PARTIAL):
@@ -110,16 +154,42 @@ def _run(db: Session, dataset_id: str, job_id: str) -> None:
                 job.failed_profiles += 1
         db.commit()
 
-        if not progressed and all(
-            p.enrichment_state == EnrichmentState.WAITING_FOR_FREE_LLM for p in batch
-        ):
-            log.warning("all remaining profiles waiting for free LLM — pausing run")
-            break
         if not progressed:
-            log.warning("no progress this iteration — stopping to avoid a loop")
+            remaining = repo.enrichment_state_counts(db, dataset_id)
+            waiting = remaining.get(EnrichmentState.WAITING_FOR_FREE_LLM, 0)
+            log.warning(
+                "no progress this iteration — stopping (waiting_for_llm=%d, semantic_breaker=%s)",
+                waiting,
+                ctx.semantic_disabled,
+            )
             break
 
     _finalize(db, job, dataset_id)
+
+
+class _RunContext:
+    """Mutable state shared across one enrichment run."""
+
+    _MAX_CONSECUTIVE_LLM_FAILS = 3
+
+    def __init__(self) -> None:
+        self.consecutive_llm_fails = 0
+        self.semantic_disabled = False
+
+    def note_llm_failure(self) -> None:
+        self.consecutive_llm_fails += 1
+        if self.consecutive_llm_fails >= self._MAX_CONSECUTIVE_LLM_FAILS:
+            if not self.semantic_disabled:
+                log.warning(
+                    "free LLM unavailable %d times in a row — skipping the semantic step "
+                    "for the rest of this run; profiles will still be scraped, normalized, "
+                    "embedded and marked READY. Resume later to backfill semantics.",
+                    self.consecutive_llm_fails,
+                )
+            self.semantic_disabled = True
+
+    def note_llm_success(self) -> None:
+        self.consecutive_llm_fails = 0
 
 
 def _finalize(db: Session, job: EnrichmentJob, dataset_id: str) -> None:
@@ -224,19 +294,33 @@ def _fail_or_retry(db: Session, people: list[Person], reason: str) -> None:
     db.flush()
 
 
-def _drive_to_ready(db: Session, p: Person) -> None:
+def _drive_to_ready(db: Session, p: Person, ctx: "_RunContext | None" = None) -> None:
+    ctx = ctx or _RunContext()
     if p.enrichment_state == EnrichmentState.APIFY_COMPLETE:
         _normalize_step(db, p)
         db.flush()
 
-    if p.enrichment_state == EnrichmentState.NORMALIZED:
-        from app.services.semantic_enrich import enrich_person_semantics
+    # Embed as soon as we have normalized rows — independent of the LLM step, so a
+    # rate-limited semantic pass never leaves a profile unsearchable.
+    if p.enrichment_state in (EnrichmentState.NORMALIZED, EnrichmentState.WAITING_FOR_FREE_LLM):
+        _embedding_step(db, p)
 
-        enrich_person_semantics(db, p)
+        if ctx.semantic_disabled:
+            p.enrichment_state = EnrichmentState.LLM_COMPLETE  # skip; semantic_version stays NULL
+        else:
+            from app.services.semantic_enrich import enrich_person_semantics
+
+            enrich_person_semantics(db, p)
+            if p.enrichment_state == EnrichmentState.WAITING_FOR_FREE_LLM:
+                ctx.note_llm_failure()
+                if ctx.semantic_disabled:
+                    p.enrichment_state = EnrichmentState.LLM_COMPLETE
+            elif p.enrichment_state == EnrichmentState.LLM_COMPLETE:
+                ctx.note_llm_success()
         db.flush()
 
     if p.enrichment_state == EnrichmentState.LLM_COMPLETE:
-        _embedding_step(db, p)
+        _embedding_step(db, p)  # re-embed if semantics just landed (adds keywords)
         _mark_ready_or_partial(db, p)
         db.flush()
 

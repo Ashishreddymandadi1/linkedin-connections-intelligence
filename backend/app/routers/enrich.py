@@ -22,15 +22,22 @@ def enrich_dataset(
     if not ds:
         raise HTTPException(404, "dataset not found")
 
-    pending = repo.people_needing_enrichment(db, dataset_id)
-    if not pending:
-        return {"started": False, "message": "all profiles already enriched", "pending": 0}
-
     from app.config import settings
-    from app.services.enrichment_runner import start_enrichment
+    from app.services.enrichment_runner import backfill_semantics, start_enrichment
 
-    job = repo.create_job(db, dataset_id, actor_id=settings.apify_actor_id, requested=len(pending))
-    db.commit()
+    pending = repo.people_needing_enrichment(db, dataset_id)
+    if pending:
+        job = repo.create_job(db, dataset_id, actor_id=settings.apify_actor_id, requested=len(pending))
+        db.commit()
+        background.add_task(start_enrichment, dataset_id, job.id)
+        return {"started": True, "mode": "enrich", "job_id": job.id, "pending": len(pending)}
 
-    background.add_task(start_enrichment, dataset_id, job.id)
-    return {"started": True, "job_id": job.id, "pending": len(pending)}
+    # nothing left to scrape — but semantics may have been deferred by rate limits
+    missing_sem = repo.people_missing_semantics(db, dataset_id)
+    if missing_sem and settings.semantic_enabled:
+        job = repo.create_job(db, dataset_id, actor_id=settings.apify_actor_id, requested=len(missing_sem))
+        db.commit()
+        background.add_task(backfill_semantics, dataset_id, job.id)
+        return {"started": True, "mode": "backfill_semantics", "job_id": job.id, "pending": len(missing_sem)}
+
+    return {"started": False, "message": "all profiles already enriched", "pending": 0}

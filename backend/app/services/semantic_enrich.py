@@ -17,17 +17,22 @@ from app.models import Person
 log = logging.getLogger("app.semantic")
 
 
-def _store_empty(db: Session, person: Person, reason: str) -> None:
-    repo.upsert_semantic(
-        db, person.id, {}, version=settings.semantic_profile_version, provider="none", model=reason
-    )
-    person.semantic_version = settings.semantic_profile_version
+def _advance_without_semantics(person: Person, *, deferred: bool) -> None:
+    """Move the state machine on without a semantic record.
+
+    ``deferred=True`` leaves ``semantic_version`` NULL so a later resume /
+    backfill re-attempts the LLM pass. ``deferred=False`` means the feature is
+    genuinely off and we don't want it retried.
+    """
     person.enrichment_state = EnrichmentState.LLM_COMPLETE
+    if not deferred:
+        person.semantic_version = settings.semantic_profile_version
 
 
 def enrich_person_semantics(db: Session, person: Person, *, force: bool = False) -> None:
     if not settings.semantic_enabled:
-        _store_empty(db, person, "disabled")
+        # feature off for this run, but a later run with it on should still fill these in
+        _advance_without_semantics(person, deferred=True)
         return
 
     existing = repo.get_semantic(db, person.id)
