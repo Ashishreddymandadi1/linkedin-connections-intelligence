@@ -49,10 +49,15 @@ class Settings(BaseSettings):
     max_apify_retries: int = 2
     profile_ttl_days: int = 30
 
+    # ── Semantic enrichment ──────────────────────────────────
+    semantic_enabled: bool = True  # False -> skip the LLM profile pass entirely
+    semantic_profile_version: int = 1
+
     # ── Search ───────────────────────────────────────────────
     candidate_pool_size: int = 60
     top_connections: int = 20
-    semantic_profile_version: int = 1
+    llm_query_interpretation: bool = True  # False -> deterministic query parser only
+    llm_reason_generation: bool = True     # False -> deterministic reason templates
 
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

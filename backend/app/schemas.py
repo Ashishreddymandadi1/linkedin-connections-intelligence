@@ -133,6 +133,23 @@ class InferredSkill(BaseModel):
         return v.strip()
 
 
+def _coerce_str_list(v):
+    """Tolerate the model returning [{'name': x}] / [{'skill': x}] / 'a, b'."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [p.strip() for p in v.split(",") if p.strip()]
+    out = []
+    for item in v if isinstance(v, list) else [v]:
+        if isinstance(item, str):
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            val = item.get("name") or item.get("skill") or item.get("value") or item.get("keyword")
+            if val:
+                out.append(str(val).strip())
+    return [x for x in out if x]
+
+
 class ProfileSemanticData(BaseModel):
     seniority_level: str | None = None
     job_families: list[str] = []
@@ -151,12 +168,43 @@ class ProfileSemanticData(BaseModel):
     role_keywords: list[str] = []
     searchable_keywords: list[str] = []
 
-    @field_validator("years_of_experience")
+    _norm_lists = field_validator(
+        "job_families",
+        "technical_domains",
+        "industries",
+        "explicit_skills",
+        "leadership_experience",
+        "domain_expertise",
+        "past_company_names",
+        "current_company_names",
+        "education_keywords",
+        "role_keywords",
+        "searchable_keywords",
+        mode="before",
+    )(staticmethod(_coerce_str_list))
+
+    @field_validator("inferred_skills", mode="before")
     @classmethod
-    def _sane_yoe(cls, v: float | None) -> float | None:
-        if v is None:
+    def _coerce_inferred(cls, v):
+        if not v:
+            return []
+        out = []
+        for item in v if isinstance(v, list) else [v]:
+            if isinstance(item, dict):
+                out.append(item)
+            elif isinstance(item, str):
+                out.append({"skill": item, "confidence": 0.5, "evidence": ""})
+        return out
+
+    @field_validator("years_of_experience", mode="before")
+    @classmethod
+    def _sane_yoe(cls, v) -> float | None:
+        if v is None or v == "":
             return None
-        return max(0.0, min(60.0, float(v)))
+        try:
+            return max(0.0, min(60.0, float(v)))
+        except (TypeError, ValueError):
+            return None
 
 
 # ─────────────────── validated LLM output: query ───────────────────

@@ -1,7 +1,7 @@
 """LLM semantic enrichment of one normalized profile (spec §26–§27).
 
-M4 fills in the real Groq-chain call. For now this advances the state machine
-and stores an empty semantic record so the pipeline is end-to-end runnable.
+Caching: a person is only re-run when the raw profile changed materially or the
+``semantic_profile_version`` bumped (spec §66).
 """
 from __future__ import annotations
 
@@ -16,27 +16,42 @@ from app.models import Person
 
 log = logging.getLogger("app.semantic")
 
-_ENABLED = True  # set False to skip semantic step entirely
+
+def _store_empty(db: Session, person: Person, reason: str) -> None:
+    repo.upsert_semantic(
+        db, person.id, {}, version=settings.semantic_profile_version, provider="none", model=reason
+    )
+    person.semantic_version = settings.semantic_profile_version
+    person.enrichment_state = EnrichmentState.LLM_COMPLETE
 
 
-def enrich_person_semantics(db: Session, person: Person) -> None:
-    """Populate ``profile_semantics`` for ``person`` and move state forward."""
-    try:
-        from app.services.semantic_llm import derive_semantics  # optional, added in M4
-    except ImportError:
-        derive_semantics = None
+def enrich_person_semantics(db: Session, person: Person, *, force: bool = False) -> None:
+    if not settings.semantic_enabled:
+        _store_empty(db, person, "disabled")
+        return
 
-    if not _ENABLED or derive_semantics is None:
-        repo.upsert_semantic(
-            db, person.id, {}, version=settings.semantic_profile_version, provider="none", model="none"
-        )
-        person.semantic_version = settings.semantic_profile_version
+    existing = repo.get_semantic(db, person.id)
+    if (
+        not force
+        and existing
+        and existing.data
+        and existing.version == settings.semantic_profile_version
+        and person.semantic_version == settings.semantic_profile_version
+    ):
         person.enrichment_state = EnrichmentState.LLM_COMPLETE
         return
 
-    result = derive_semantics(db, person)
+    from app.services.semantic_llm import derive_semantics
+
+    try:
+        result = derive_semantics(db, person)
+    except Exception:  # noqa: BLE001
+        log.exception("semantic derivation crashed for %s — queuing", person.id)
+        person.enrichment_state = EnrichmentState.WAITING_FOR_FREE_LLM
+        return
+
     if result is None:
-        # all free providers exhausted — do not fail the dataset (spec §25)
+        # every free provider exhausted — do not fail the dataset (spec §25)
         person.enrichment_state = EnrichmentState.WAITING_FOR_FREE_LLM
         return
 
@@ -46,3 +61,4 @@ def enrich_person_semantics(db: Session, person: Person) -> None:
     )
     person.semantic_version = settings.semantic_profile_version
     person.enrichment_state = EnrichmentState.LLM_COMPLETE
+    log.info("semantics for %s via %s", person.id, provider)
