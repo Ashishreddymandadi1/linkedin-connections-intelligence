@@ -14,20 +14,23 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
 });
 
-const router = createBrowserRouter([
-  {
-    path: "/",
-    element: <App />,
-    children: [
-      { index: true, element: <Navigate to="/upload" replace /> },
-      { path: "upload", element: <UploadPage /> },
-      { path: "datasets/:datasetId/enriching", element: <EnrichmentPage /> },
-      { path: "datasets/:datasetId", element: <DashboardPage /> },
-      { path: "datasets/:datasetId/search", element: <SearchPage /> },
-      { path: "datasets/:datasetId/search/:searchId", element: <ResultsPage /> },
-    ],
-  },
-]);
+const router = createBrowserRouter(
+  [
+    {
+      path: "/",
+      element: <App />,
+      children: [
+        { index: true, element: <Navigate to="/upload" replace /> },
+        { path: "upload", element: <UploadPage /> },
+        { path: "datasets/:datasetId/enriching", element: <EnrichmentPage /> },
+        { path: "datasets/:datasetId", element: <DashboardPage /> },
+        { path: "datasets/:datasetId/search", element: <SearchPage /> },
+        { path: "datasets/:datasetId/search/:searchId", element: <ResultsPage /> },
+      ],
+    },
+  ],
+  { future: { v7_startTransition: true, v7_relativeSplatPath: true } },
+);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

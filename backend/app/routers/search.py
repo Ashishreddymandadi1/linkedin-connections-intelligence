@@ -29,3 +29,19 @@ def get_search(search_id: str, db: Session = Depends(get_db)) -> SearchResponse:
     if not resp:
         raise HTTPException(404, "search not found")
     return resp
+
+
+@router.get("/datasets/{dataset_id}/searches")
+def search_history(dataset_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    if not repo.get_dataset(db, dataset_id):
+        raise HTTPException(404, "dataset not found")
+    return [
+        {
+            "search_id": s.id,
+            "query": s.query_text,
+            "created_at": s.created_at.isoformat(),
+            "total_candidates": s.total_candidates,
+            "llm_provider": s.llm_provider,
+        }
+        for s in repo.list_search_queries(db, dataset_id)
+    ]

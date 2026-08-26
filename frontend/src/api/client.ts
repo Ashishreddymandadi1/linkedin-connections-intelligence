@@ -58,4 +58,15 @@ export const api = {
     }),
 
   getSearch: (searchId: string) => req<SearchResponse>(`/search/${searchId}`),
+
+  searchHistory: (datasetId: string) =>
+    req<
+      Array<{
+        search_id: string;
+        query: string;
+        created_at: string;
+        total_candidates: number;
+        llm_provider: string | null;
+      }>
+    >(`/datasets/${datasetId}/searches`),
 };

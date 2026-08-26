@@ -262,6 +262,17 @@ def get_search_query(db: Session, search_id: str) -> SearchQuery | None:
     return db.get(SearchQuery, search_id)
 
 
+def list_search_queries(db: Session, dataset_id: str, limit: int = 25) -> list[SearchQuery]:
+    return list(
+        db.scalars(
+            select(SearchQuery)
+            .where(SearchQuery.dataset_id == dataset_id)
+            .order_by(SearchQuery.created_at.desc())
+            .limit(limit)
+        )
+    )
+
+
 def add_search_result(db: Session, **kwargs) -> None:
     db.add(SearchResult(**kwargs))
     db.flush()

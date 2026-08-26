@@ -49,7 +49,7 @@ def refresh_person(
     force: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict:
-    from app.services.enrichment_worker import refresh_single_person
+    from app.services.enrichment_runner import refresh_single_person
 
     p = repo.get_person(db, person_id)
     if not p:

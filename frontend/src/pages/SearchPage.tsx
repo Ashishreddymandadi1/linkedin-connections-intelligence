@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { Button, Card } from "../components/ui";
 
@@ -21,6 +21,11 @@ export default function SearchPage() {
   const run = useMutation({
     mutationFn: () => api.search(datasetId, q),
     onSuccess: (res) => nav(`/datasets/${datasetId}/search/${res.search_id}`, { state: res }),
+  });
+
+  const history = useQuery({
+    queryKey: ["searches", datasetId],
+    queryFn: () => api.searchHistory(datasetId),
   });
 
   return (
@@ -58,6 +63,27 @@ export default function SearchPage() {
           </button>
         ))}
       </div>
+
+      {history.data && history.data.length > 0 && (
+        <div className="mt-10">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Recent searches</h2>
+          <ul className="mt-2 divide-y divide-slate-100 rounded-xl border border-slate-200 bg-card">
+            {history.data.map((h) => (
+              <li key={h.search_id}>
+                <Link
+                  to={`/datasets/${datasetId}/search/${h.search_id}`}
+                  className="flex items-center justify-between px-4 py-2.5 text-sm hover:bg-slate-50"
+                >
+                  <span className="truncate">{h.query}</span>
+                  <span className="ml-3 shrink-0 text-xs text-ink-faint">
+                    {new Date(h.created_at).toLocaleDateString()} · {h.total_candidates} matched
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
