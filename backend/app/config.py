@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # ── Embeddings (local) ───────────────────────────────────
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dim: int = 384
+    embeddings_enabled: bool = True  # False -> deterministic hash vectors (tests / no-torch)
 
     # ── Database ─────────────────────────────────────────────
     database_url: str = "sqlite:///./data/app.db"

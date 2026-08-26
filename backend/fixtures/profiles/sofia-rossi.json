@@ -1,0 +1,73 @@
+{
+  "id": "ACoAAB5sofi00",
+  "publicIdentifier": "sofia-rossi",
+  "linkedinUrl": "https://www.linkedin.com/in/sofia-rossi",
+  "firstName": "Sofia",
+  "lastName": "Rossi",
+  "headline": "Solutions Architect at AWS | Cloud architecture, cost optimization, billing",
+  "about": "Solutions Architect at Amazon Web Services. I help enterprise customers design well-architected cloud systems and get their AWS bill under control. Ex-consultant. I speak fluent Cost Explorer, Savings Plans, and Reserved Instances, and I've done dozens of distributed-systems migrations.",
+  "photo": "https://media.licdn.com/dms/image/sofia.jpg",
+  "verified": true,
+  "premium": true,
+  "influencer": false,
+  "openToWork": false,
+  "hiring": false,
+  "registeredAt": "2016-05-20T00:00:00.000Z",
+  "connectionsCount": 980,
+  "followerCount": 1500,
+  "topSkills": "AWS, Cloud Architecture, Cost Optimization, Solution Architecture, Distributed Systems",
+  "location": {
+    "linkedinText": "Austin, Texas, United States",
+    "countryCode": "US",
+    "parsed": { "text": "Austin, Texas, United States", "country": "United States", "countryCode": "US", "state": "Texas", "city": "Austin" }
+  },
+  "currentPosition": [{ "companyName": "Amazon Web Services (AWS)" }],
+  "experience": [
+    {
+      "position": "Senior Solutions Architect",
+      "companyName": "Amazon Web Services (AWS)",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/amazon-web-services/",
+      "location": "Austin, Texas",
+      "employmentType": "Full-time",
+      "duration": "Feb 2020 - Present · 5 yrs 6 mos",
+      "description": "Enterprise solutions architecture. Lead cloud cost optimization engagements: right-sizing, Savings Plans modeling, architecture reviews against the Well-Architected Framework. Guided several large migrations of distributed systems to AWS.",
+      "skills": ["AWS", "Cost Optimization", "Cloud Architecture", "Well-Architected Framework"],
+      "startDate": { "month": "Feb", "year": 2020, "text": "Feb 2020" },
+      "endDate": { "month": null, "year": null, "text": "Present" }
+    },
+    {
+      "position": "Cloud Consultant",
+      "companyName": "Accenture",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/accenture/",
+      "location": "Milan, Italy",
+      "employmentType": "Full-time",
+      "duration": "Sep 2016 - Jan 2020 · 3 yrs 5 mos",
+      "description": "Cloud migration consulting for financial services clients across EMEA.",
+      "skills": ["Cloud Migration", "Consulting", "AWS"],
+      "startDate": { "month": "Sep", "year": 2016, "text": "Sep 2016" },
+      "endDate": { "month": "Jan", "year": 2020, "text": "Jan 2020" }
+    }
+  ],
+  "education": [
+    {
+      "schoolName": "Politecnico di Milano",
+      "degree": "Master of Science",
+      "fieldOfStudy": "Computer Science and Engineering",
+      "startDate": { "year": 2014 },
+      "endDate": { "year": 2016 },
+      "period": "2014 - 2016"
+    }
+  ],
+  "skills": [
+    { "name": "Amazon Web Services (AWS)" },
+    { "name": "Cloud Architecture" },
+    { "name": "Cost Optimization" },
+    { "name": "Solution Architecture" },
+    { "name": "Distributed Systems" }
+  ],
+  "certifications": [
+    { "title": "AWS Certified Solutions Architect – Professional", "issuedBy": "Amazon Web Services (AWS)", "issuedAt": "2021" }
+  ],
+  "languages": [{ "name": "Italian", "proficiency": "Native or bilingual" }, { "name": "English", "proficiency": "Full professional" }],
+  "moreProfiles": []
+}

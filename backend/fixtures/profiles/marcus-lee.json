@@ -1,0 +1,74 @@
+{
+  "id": "ACoAAB2marc00",
+  "publicIdentifier": "marcus-lee",
+  "linkedinUrl": "https://www.linkedin.com/in/marcus-lee",
+  "firstName": "Marcus",
+  "lastName": "Lee",
+  "headline": "Principal Engineer at Microsoft Azure | Previously Amazon Web Services",
+  "about": "18 years building cloud infrastructure. Led the control plane for a major Azure networking service. Before that, 6 years at AWS on EC2 networking. Deep expertise in distributed consensus, high-throughput data planes, and operational excellence at scale.",
+  "photo": "https://media.licdn.com/dms/image/marcus.jpg",
+  "verified": true,
+  "premium": false,
+  "influencer": false,
+  "openToWork": false,
+  "hiring": true,
+  "registeredAt": "2008-03-10T00:00:00.000Z",
+  "connectionsCount": 500,
+  "followerCount": 3400,
+  "topSkills": "Distributed Systems, C++, Cloud Infrastructure, Networking, Go",
+  "location": {
+    "linkedinText": "Redmond, Washington, United States",
+    "countryCode": "US",
+    "parsed": { "text": "Redmond, Washington, United States", "country": "United States", "countryCode": "US", "state": "Washington", "city": "Redmond" }
+  },
+  "currentPosition": [{ "companyName": "Microsoft" }],
+  "experience": [
+    {
+      "position": "Principal Software Engineer",
+      "companyName": "Microsoft",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/microsoft/",
+      "companyId": "1035",
+      "location": "Redmond, Washington",
+      "employmentType": "Full-time",
+      "duration": "Mar 2017 - Present · 8 yrs 5 mos",
+      "description": "Technical lead for the control plane of an Azure networking service. Drove a re-architecture onto a Paxos-based replicated store; owns SLA for 99.99% availability.",
+      "skills": ["Distributed Systems", "C++", "Azure", "Consensus Algorithms"],
+      "startDate": { "month": "Mar", "year": 2017, "text": "Mar 2017" },
+      "endDate": { "month": null, "year": null, "text": "Present" }
+    },
+    {
+      "position": "Senior Software Development Engineer",
+      "companyName": "Amazon Web Services (AWS)",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/amazon-web-services/",
+      "companyId": "18124",
+      "location": "Seattle, Washington",
+      "employmentType": "Full-time",
+      "duration": "Jun 2011 - Feb 2017 · 5 yrs 9 mos",
+      "description": "EC2 networking data plane. Built packet processing pipelines in C++ handling line-rate traffic. On-call for a tier-1 service.",
+      "skills": ["C++", "Networking", "AWS", "Linux"],
+      "startDate": { "month": "Jun", "year": 2011, "text": "Jun 2011" },
+      "endDate": { "month": "Feb", "year": 2017, "text": "Feb 2017" }
+    }
+  ],
+  "education": [
+    {
+      "schoolName": "University of Washington",
+      "degree": "Bachelor of Science",
+      "fieldOfStudy": "Computer Engineering",
+      "startDate": { "year": 2004 },
+      "endDate": { "year": 2008 },
+      "period": "2004 - 2008"
+    }
+  ],
+  "skills": [
+    { "name": "Distributed Systems" },
+    { "name": "C++" },
+    { "name": "Amazon Web Services (AWS)" },
+    { "name": "Microsoft Azure" },
+    { "name": "Computer Networking" },
+    { "name": "Go (Programming Language)" }
+  ],
+  "certifications": [],
+  "languages": [{ "name": "English", "proficiency": "Native or bilingual" }, { "name": "Korean", "proficiency": "Professional working" }],
+  "moreProfiles": []
+}

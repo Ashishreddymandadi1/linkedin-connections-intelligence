@@ -1,0 +1,17 @@
+Notes:
+"When exporting your connection data, you may need to wait up to 72 hours."
+
+First Name,Last Name,URL,Email Address,Company,Position,Connected On
+Jane,Smith,https://www.linkedin.com/in/jane-smith,jane.smith@example.com,Google,Senior Software Engineer,15 Jan 2025
+Marcus,Lee,https://www.linkedin.com/in/marcus-lee,,Microsoft,Principal Engineer,03 Nov 2023
+Priya,Patel,https://linkedin.com/in/priya-patel/?trk=contact-feed,,Stripe,Staff Data Scientist,22 Aug 2024
+Daniel,Okafor,https://www.linkedin.com/in/daniel-okafor,daniel@startup.io,Ramp,Founding Engineer,09 May 2022
+Sofia,Rossi,https://www.linkedin.com/in/sofia-rossi?utm_source=share,,Amazon Web Services,Solutions Architect,30 Mar 2021
+Kenji,Tanaka,https://www.linkedin.com/in/kenji-tanaka,,Netflix,Engineering Manager,11 Feb 2024
+Amara,Nwosu,https://www.linkedin.com/in/amara-nwosu,,Databricks,Senior Product Manager,18 Jul 2023
+Liam,Murphy,https://www.linkedin.com/in/liam-murphy,,Meta,Software Engineer,05 Dec 2024
+Elena,Volkov,https://www.linkedin.com/in/elena-volkov,,Two Sigma,Quantitative Researcher,27 Sep 2022
+Noah,Bergstrom,https://www.linkedin.com/in/noah-bergstrom,,Snowflake,Solutions Engineer,14 Jun 2023
+Ava,Chen,https://www.linkedin.com/in/ava-chen,,Google,Product Designer,02 Feb 2025
+Duplicate,Jane,https://www.linkedin.com/in/jane-smith/,,Google,SWE,20 Feb 2025
+NoLink,Person,,,MysteryCo,Director,01 Jan 2020

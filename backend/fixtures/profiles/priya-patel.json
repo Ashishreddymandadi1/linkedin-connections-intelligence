@@ -1,0 +1,75 @@
+{
+  "id": "ACoAAB3priy00",
+  "publicIdentifier": "priya-patel",
+  "linkedinUrl": "https://www.linkedin.com/in/priya-patel",
+  "firstName": "Priya",
+  "lastName": "Patel",
+  "headline": "Staff Data Scientist at Stripe | ML infrastructure & fraud",
+  "about": "I build machine learning systems for fraud detection and risk. At Stripe I own the feature platform and real-time scoring pipeline. Previously at Amazon on demand forecasting. MS in Machine Learning from Carnegie Mellon.",
+  "photo": "https://media.licdn.com/dms/image/priya.jpg",
+  "verified": false,
+  "premium": true,
+  "influencer": false,
+  "openToWork": false,
+  "hiring": false,
+  "registeredAt": "2015-09-01T00:00:00.000Z",
+  "connectionsCount": 1100,
+  "followerCount": 900,
+  "topSkills": "Machine Learning, Python, MLOps, Feature Engineering, PyTorch",
+  "location": {
+    "linkedinText": "San Francisco, California, United States",
+    "countryCode": "US",
+    "parsed": { "text": "San Francisco, California, United States", "country": "United States", "countryCode": "US", "state": "California", "city": "San Francisco" }
+  },
+  "currentPosition": [{ "companyName": "Stripe" }],
+  "experience": [
+    {
+      "position": "Staff Data Scientist",
+      "companyName": "Stripe",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/stripe/",
+      "location": "San Francisco, California",
+      "employmentType": "Full-time",
+      "duration": "Apr 2021 - Present · 4 yrs 4 mos",
+      "description": "Own the ML feature platform and the real-time fraud scoring service (p99 < 40ms). Built the offline/online feature parity system. Led migration of training pipelines to a managed platform.",
+      "skills": ["Machine Learning", "MLOps", "Python", "Real-time Systems"],
+      "startDate": { "month": "Apr", "year": 2021, "text": "Apr 2021" },
+      "endDate": { "month": null, "year": null, "text": "Present" }
+    },
+    {
+      "position": "Data Scientist",
+      "companyName": "Amazon",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/amazon/",
+      "location": "Seattle, Washington",
+      "employmentType": "Full-time",
+      "duration": "Aug 2017 - Mar 2021 · 3 yrs 8 mos",
+      "description": "Demand forecasting for retail. Deep learning models (LSTM, later transformers) for millions of SKUs. Deployed on AWS SageMaker.",
+      "skills": ["Forecasting", "Deep Learning", "AWS", "PyTorch"],
+      "startDate": { "month": "Aug", "year": 2017, "text": "Aug 2017" },
+      "endDate": { "month": "Mar", "year": 2021, "text": "Mar 2021" }
+    }
+  ],
+  "education": [
+    {
+      "schoolName": "Carnegie Mellon University",
+      "degree": "Master of Science",
+      "fieldOfStudy": "Machine Learning",
+      "startDate": { "year": 2015 },
+      "endDate": { "year": 2017 },
+      "period": "2015 - 2017"
+    }
+  ],
+  "skills": [
+    { "name": "Machine Learning" },
+    { "name": "Python (Programming Language)" },
+    { "name": "PyTorch" },
+    { "name": "MLOps" },
+    { "name": "Feature Engineering" },
+    { "name": "Fraud Detection" }
+  ],
+  "certifications": [],
+  "publications": [
+    { "title": "Scaling Real-time Feature Serving at Stripe", "publishedAt": "2023", "link": "https://example.com/talk" }
+  ],
+  "languages": [{ "name": "English" }, { "name": "Hindi" }, { "name": "Gujarati" }],
+  "moreProfiles": []
+}

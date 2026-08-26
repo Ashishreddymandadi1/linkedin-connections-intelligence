@@ -1,0 +1,72 @@
+{
+  "id": "ACoAAB4dani00",
+  "publicIdentifier": "daniel-okafor",
+  "linkedinUrl": "https://www.linkedin.com/in/daniel-okafor",
+  "firstName": "Daniel",
+  "lastName": "Okafor",
+  "headline": "Founding Engineer at Ramp | ex-Google | Full-stack, payments, startups",
+  "about": "Founding engineer at Ramp (fintech). Before the startup world I spent 4 years at Google on Ads infrastructure. I like going from zero to one: shipped Ramp's first bill-pay product end to end. Comfortable across the stack — React, Node, Postgres, and a lot of payments plumbing.",
+  "photo": "https://media.licdn.com/dms/image/daniel.jpg",
+  "verified": false,
+  "premium": false,
+  "influencer": false,
+  "openToWork": false,
+  "hiring": true,
+  "registeredAt": "2013-01-15T00:00:00.000Z",
+  "connectionsCount": 640,
+  "followerCount": 410,
+  "topSkills": "TypeScript, React, Node.js, PostgreSQL, Payments",
+  "location": {
+    "linkedinText": "New York, New York, United States",
+    "countryCode": "US",
+    "parsed": { "text": "New York, New York, United States", "country": "United States", "countryCode": "US", "state": "New York", "city": "New York" }
+  },
+  "currentPosition": [{ "companyName": "Ramp" }],
+  "experience": [
+    {
+      "position": "Founding Engineer",
+      "companyName": "Ramp",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/ramp/",
+      "location": "New York, New York",
+      "employmentType": "Full-time",
+      "duration": "May 2019 - Present · 6 yrs 3 mos",
+      "description": "Employee #7. Built the first version of bill pay: ledger, approval flows, ACH integration. Now lead the payments platform team (5 engineers).",
+      "skills": ["TypeScript", "Node.js", "PostgreSQL", "Payments", "Team Leadership"],
+      "startDate": { "month": "May", "year": 2019, "text": "May 2019" },
+      "endDate": { "month": null, "year": null, "text": "Present" }
+    },
+    {
+      "position": "Software Engineer",
+      "companyName": "Google",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/google/",
+      "location": "Mountain View, California",
+      "employmentType": "Full-time",
+      "duration": "Jul 2015 - Apr 2019 · 3 yrs 10 mos",
+      "description": "Ads serving infrastructure. Latency optimization on the request path in C++ and Go.",
+      "skills": ["C++", "Go", "Distributed Systems"],
+      "startDate": { "month": "Jul", "year": 2015, "text": "Jul 2015" },
+      "endDate": { "month": "Apr", "year": 2019, "text": "Apr 2019" }
+    }
+  ],
+  "education": [
+    {
+      "schoolName": "Massachusetts Institute of Technology",
+      "degree": "Bachelor of Science",
+      "fieldOfStudy": "Computer Science and Engineering",
+      "startDate": { "year": 2011 },
+      "endDate": { "year": 2015 },
+      "period": "2011 - 2015"
+    }
+  ],
+  "skills": [
+    { "name": "TypeScript" },
+    { "name": "React.js" },
+    { "name": "Node.js" },
+    { "name": "PostgreSQL" },
+    { "name": "Payment Systems" },
+    { "name": "Startups" }
+  ],
+  "certifications": [],
+  "languages": [{ "name": "English" }],
+  "moreProfiles": []
+}

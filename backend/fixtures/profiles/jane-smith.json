@@ -1,0 +1,83 @@
+{
+  "id": "ACoAAB1jane00",
+  "publicIdentifier": "jane-smith",
+  "linkedinUrl": "https://www.linkedin.com/in/jane-smith",
+  "firstName": "Jane",
+  "lastName": "Smith",
+  "headline": "Senior Software Engineer at Google | ex-Amazon | Distributed systems & AWS",
+  "about": "Backend engineer focused on large-scale distributed systems. At Amazon I built highly available services on AWS (ECS, DynamoDB, SQS) handling millions of requests per minute. Now at Google working on storage infrastructure. I care about latency, correctness, and on-call sanity.",
+  "photo": "https://media.licdn.com/dms/image/jane.jpg",
+  "verified": true,
+  "premium": true,
+  "influencer": false,
+  "openToWork": false,
+  "hiring": false,
+  "registeredAt": "2014-06-01T00:00:00.000Z",
+  "connectionsCount": 842,
+  "followerCount": 1210,
+  "topSkills": "Java, AWS, Distributed Systems, Go, Kubernetes",
+  "location": {
+    "linkedinText": "Seattle, Washington, United States",
+    "countryCode": "US",
+    "parsed": { "text": "Seattle, Washington, United States", "country": "United States", "countryCode": "US", "state": "Washington", "city": "Seattle" }
+  },
+  "currentPosition": [{ "companyName": "Google" }],
+  "experience": [
+    {
+      "position": "Senior Software Engineer",
+      "companyName": "Google",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/google/",
+      "companyId": "1441",
+      "location": "Seattle, Washington, United States",
+      "employmentType": "Full-time",
+      "workplaceType": "Hybrid",
+      "duration": "Jan 2024 - Present · 1 yr 7 mos",
+      "description": "Storage infrastructure. Designed a new replication protocol for a globally distributed key-value store; reduced tail latency by 40%.",
+      "skills": ["Distributed Systems", "Go", "Storage Systems"],
+      "startDate": { "month": "Jan", "year": 2024, "text": "Jan 2024" },
+      "endDate": { "month": null, "year": null, "text": "Present" }
+    },
+    {
+      "position": "Software Development Engineer II",
+      "companyName": "Amazon",
+      "companyLinkedinUrl": "https://www.linkedin.com/company/amazon/",
+      "companyId": "1586",
+      "location": "Seattle, Washington, United States",
+      "employmentType": "Full-time",
+      "workplaceType": "On-site",
+      "duration": "Jul 2021 - Dec 2023 · 2 yrs 6 mos",
+      "description": "Built and operated highly available backend services on AWS ECS and DynamoDB for the retail ordering pipeline. Owned SQS-based async processing handling millions of messages per minute. Primary on-call.",
+      "skills": ["AWS", "Java", "DynamoDB", "Microservices"],
+      "startDate": { "month": "Jul", "year": 2021, "text": "Jul 2021" },
+      "endDate": { "month": "Dec", "year": 2023, "text": "Dec 2023" }
+    }
+  ],
+  "education": [
+    {
+      "schoolName": "Georgia Institute of Technology",
+      "schoolLinkedinUrl": "https://www.linkedin.com/school/georgia-institute-of-technology/",
+      "degree": "Master of Science",
+      "fieldOfStudy": "Computer Science",
+      "startDate": { "year": 2019, "text": "2019" },
+      "endDate": { "year": 2021, "text": "2021" },
+      "period": "2019 - 2021",
+      "skills": []
+    }
+  ],
+  "skills": [
+    { "name": "Amazon Web Services (AWS)", "endorsements": "31" },
+    { "name": "Java", "endorsements": "58" },
+    { "name": "Distributed Systems", "endorsements": "22" },
+    { "name": "Go (Programming Language)", "endorsements": "12" },
+    { "name": "Kubernetes", "endorsements": "9" }
+  ],
+  "certifications": [
+    { "title": "AWS Certified Solutions Architect – Associate", "issuedBy": "Amazon Web Services (AWS)", "issuedAt": "2022" }
+  ],
+  "projects": [],
+  "languages": [{ "name": "English", "proficiency": "Native or bilingual" }],
+  "receivedRecommendations": [],
+  "moreProfiles": [
+    { "publicIdentifier": "some-other-person", "name": "Chris Doe", "position": "Engineer at Google" }
+  ]
+}

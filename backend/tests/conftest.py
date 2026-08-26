@@ -10,6 +10,8 @@ _TEST_DB = Path(tempfile.gettempdir()) / f"lci_test_{uuid.uuid4().hex}.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB.as_posix()}"
 os.environ["USE_FIXTURES"] = "true"
 os.environ["ENVIRONMENT"] = "development"
+os.environ["EMBEDDINGS_ENABLED"] = "false"
+os.environ["DEVELOPMENT_BATCH_SIZE"] = "3"
 os.environ.setdefault("GROQ_API_KEY", "")
 os.environ.setdefault("APIFY_API_TOKEN", "")
 
