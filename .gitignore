@@ -1,0 +1,35 @@
+# secrets
+.env
+backend/.env
+*.env.local
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+backend/.venv/
+.venv/
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# data / models
+backend/data/
+*.sqlite3
+*.db
+.cache/
+hf_cache/
+
+# node
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# misc
+.DS_Store
+*.log
+.claude-flow/
+.idea/
+.vscode/
