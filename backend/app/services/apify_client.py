@@ -93,7 +93,6 @@ def _scrape_apify(urls: list[str]) -> list[dict]:
     if not settings.apify_api_token:
         raise ApifyError("APIFY_API_TOKEN is not set")
     from datetime import timedelta
-    from decimal import Decimal
 
     from apify_client import ApifyClient
 
@@ -102,21 +101,21 @@ def _scrape_apify(urls: list[str]) -> list[dict]:
         "profileScraperMode": settings.apify_profile_scraper_mode,
         "queries": urls,
     }
-    # hard cost cap per batch: expected + 3x headroom + small buffer
-    charge_cap = Decimal(str(round(len(urls) * 0.004 * 3 + 0.05, 4)))
+    # Cost is bounded by batch size × $0.004 (no email tier). Optionally cap the
+    # whole run's charge via APIFY_MAX_CHARGE_USD; 0 disables the cap.
     log.info(
-        "apify run: actor=%s profiles=%d mode=%s cap=$%s",
+        "apify run: actor=%s profiles=%d mode=%s",
         settings.apify_actor_id,
         len(urls),
         settings.apify_profile_scraper_mode,
-        charge_cap,
     )
+    call_kwargs: dict = {"run_input": run_input, "run_timeout": timedelta(seconds=600)}
+    if settings.apify_max_charge_usd and settings.apify_max_charge_usd > 0:
+        from decimal import Decimal
+
+        call_kwargs["max_total_charge_usd"] = Decimal(str(settings.apify_max_charge_usd))
     try:
-        run = client.actor(settings.apify_actor_id).call(
-            run_input=run_input,
-            run_timeout=timedelta(seconds=600),
-            max_total_charge_usd=charge_cap,
-        )
+        run = client.actor(settings.apify_actor_id).call(**call_kwargs)
     except Exception as e:  # noqa: BLE001 — normalize any client error
         raise ApifyError(f"apify call failed: {e}") from e
 

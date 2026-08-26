@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     production_batch_size: int = 50
     apify_profile_batch_size: int = 50
     max_apify_retries: int = 2
+    apify_max_charge_usd: float = 0.0  # 0 = no cap; e.g. 2.0 to hard-stop a run at $2
     profile_ttl_days: int = 30
 
     # ── Semantic enrichment ──────────────────────────────────

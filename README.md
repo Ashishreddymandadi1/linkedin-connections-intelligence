@@ -69,18 +69,27 @@ cd backend && .venv/Scripts/python -m pytest      # 59 tests
 cd frontend && npm test                            # 2 tests
 ```
 
-## Doing the real run (your 300 connections)
+## Doing the real run (your ~240 connections)
 
-1. In `backend/.env` set `USE_FIXTURES=false` (Apify goes live) and, for the first
-   pass, keep `DEVELOPMENT_BATCH_SIZE=5` / `ENVIRONMENT=development`.
-2. Start backend + frontend, open http://localhost:5182, upload your
-   `Connections.csv`.
-3. Enrichment runs in resumable batches. If the free Groq quota runs out mid-run,
-   affected profiles land in `WAITING_FOR_FREE_LLM` — press **Resume** later, nothing
-   is re-scraped.
-4. Bump `ENVIRONMENT=production` (batch size 50) once the first few batches look good.
-5. Refresh a stale profile from its page; `PROFILE_TTL_DAYS=30` guards accidental
-   re-scrapes.
+**Apify credit first.** The scraper is pay-per-event ($0.004/profile). Check
+`https://console.apify.com/billing` — the Free plan gives **$5/month** of usage that
+resets on your billing-cycle date. ~240 profiles ≈ **$0.96**, so the free credit
+covers a full run *if* it hasn't already been spent this cycle. If usage is near $5,
+either wait for the reset or add a pay-as-you-go card.
+
+1. In `backend/.env`: `USE_FIXTURES=false`, keep `DEVELOPMENT_BATCH_SIZE=5` /
+   `ENVIRONMENT=development` for the first pass. Optionally set
+   `APIFY_MAX_CHARGE_USD=2` as a hard stop.
+2. Start backend + frontend, open http://localhost:5182, upload your `Connections.csv`.
+3. Enrichment runs in resumable batches. If the free **Groq** quota runs out mid-run,
+   the semantic step is skipped for the rest of the run (profiles still get scraped,
+   normalized, embedded and marked READY). Click **Resume** later and it runs a
+   `backfill_semantics` pass — nothing is re-scraped.
+4. Bump `ENVIRONMENT=production` (batch size 50) once the first batches look good.
+5. Refresh a stale profile from its page; `PROFILE_TTL_DAYS=30` guards re-scrapes.
+
+`scripts/reset_dataset.py <dataset_id>` wipes a dataset's derived data back to PENDING
+(keeps the CSV rows) if a run went wrong.
 
 > Note on latency: when the shared Groq free tier is rate-limited, query
 > interpretation and reason generation fall back to `gpt-oss-20b` and then to
