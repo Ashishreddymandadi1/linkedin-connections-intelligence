@@ -1,0 +1,126 @@
+{
+  "dataset_id": "dataset_6e11b665b23c",
+  "notes": "Labelled queries against the real 187-profile network. `relevant` = public_identifiers judged clearly relevant (by inspecting the enriched data). `kind`: precision = small clean answer set; recall = large set, measure recall@20 + top-k purity; new = needs a capability added in v2 (baseline expected ~0).",
+  "queries": [
+    {
+      "query": "People who work at Tata Consultancy Services",
+      "kind": "precision",
+      "relevant": ["anbazhagan-ezhil", "debashish-dey-5313b035", "hariharan-kaushik", "lalith-pabbathi-36a64b23a", "lokeshkarra", "phanishanmukh", "sravya2003"]
+    },
+    {
+      "query": "People who work at Schneider Electric",
+      "kind": "precision",
+      "relevant": ["amrita-laasya-8555541b5", "gnapikasindhu", "manu2512"]
+    },
+    {
+      "query": "People who previously worked at Cognizant",
+      "kind": "precision",
+      "relevant": ["hithin-vaibhav-88a3b324a", "debashish-dey-5313b035", "keerthana-yakkati-06941b214", "romesa-ansari", "suryac789"]
+    },
+    {
+      "query": "People currently at a big tech or product company",
+      "kind": "recall",
+      "relevant": ["abhiram-kunchapu-27723639b", "anisha-seshadri-970493264", "bharathraj-s", "lakhotia-gaurav", "hari-charan-reddy-d-596867266", "hemchand-swarna-b271581b1", "keerthana-yakkati-06941b214", "purnachandu2003", "reetgupta", "sai-sreekar-raju-konduru", "srisuryachunchu", "sudarshan-rajaram-aa8780233"]
+    },
+    {
+      "query": "People who work at Amazon",
+      "kind": "precision",
+      "relevant": ["hari-charan-reddy-d-596867266", "reetgupta"]
+    },
+    {
+      "query": "People who studied at Georgia State University",
+      "kind": "recall",
+      "relevant": ["aasrith-mandava", "adon19", "gowthamrevanur", "harika-chinnam-a8521a222", "hemanthponraj", "hemchand-swarna-b271581b1", "jalen-spivey-b458a829a", "jasnoor-singh-mac", "kalyani-muske-420562232", "kuldeep-kharb", "pushkar-cherukuri", "sricharantreddy", "suryac789", "venkata-dheeraj"]
+    },
+    {
+      "query": "People who studied at Amrita Vishwa Vidyapeetham",
+      "kind": "recall",
+      "relevant": ["abhijith-reddy-chalamalla", "aashish-reddy-shenagapally", "abhiram-kunchapu-27723639b", "abhishek-gummanur", "adithiyan-pv-68639b258", "amrita-laasya-8555541b5", "anantha-anil-teja", "anbazhagan-ezhil", "bharathraj-s", "hemesh-r-m", "manu2512"]
+    },
+    {
+      "query": "Machine learning and deep learning engineers",
+      "kind": "recall",
+      "relevant": ["nagur-shareef-shaik", "bharathraj-s", "asifp0209", "adithiyan-pv-68639b258", "hemesh-r-m", "pranavinarukulla", "dinakar-selva", "avinash-mahadevan-95b802249"]
+    },
+    {
+      "query": "People who work with large language models and NLP",
+      "kind": "recall",
+      "relevant": ["adithiyan-pv-68639b258", "asifp0209", "bharathraj-s", "dinakar-selva", "hemesh-r-m", "avinash-mahadevan-95b802249", "kowsikperumalla"]
+    },
+    {
+      "query": "People with AWS and cloud experience",
+      "kind": "recall",
+      "relevant": ["reetgupta", "abhiram-kunchapu-27723639b", "asifp0209", "haree-krishna-863b16271", "srisuryachunchu", "nischinth", "divya-reddy-4107a8283"]
+    },
+    {
+      "query": "Data engineers",
+      "kind": "precision",
+      "relevant": ["balajivemula2002", "ganesh-kekkereni-485a89218", "kinshuk-thatikonda-b2b6ab218", "nischinth", "pranavinarukulla", "srisuryachunchu", "harideep-reddy-6a296323b"]
+    },
+    {
+      "query": "Data scientists and data analysts",
+      "kind": "precision",
+      "relevant": ["purnachandu2003", "sai-sreekar-raju-konduru", "sai-sukesh-94267722a", "manish-daripelli-05b19a250", "balajivemula2002"]
+    },
+    {
+      "query": "Cybersecurity analysts and security engineers",
+      "kind": "precision",
+      "relevant": ["anoosha-reddy-yaraboina", "chandrahas-etikala", "chitra-harini", "reaperdhan", "gowthamrevanur", "pranavraheja", "shivamaniambati"]
+    },
+    {
+      "query": "Full stack and frontend developers who know React",
+      "kind": "recall",
+      "relevant": ["aashish-reddy-shenagapally", "abhiram-kunchapu-27723639b", "nikhitha-sri06", "lakhotia-gaurav", "ganesh-kekkereni-485a89218"]
+    },
+    {
+      "query": "Software engineers who know Java",
+      "kind": "recall",
+      "relevant": ["aashish-reddy-shenagapally", "abhiram-kunchapu-27723639b", "nikhitha-sri06", "anisha-seshadri-970493264", "hemchand-swarna-b271581b1", "sudarshan-rajaram-aa8780233"]
+    },
+    {
+      "query": "People who work at IBM",
+      "kind": "precision",
+      "relevant": ["thanusrivenkatesh"]
+    },
+    {
+      "query": "Founders and people building their own company",
+      "kind": "precision",
+      "relevant": ["aashish-pahwa", "martinmusiol1", "yasaswi-kompella", "abhishek-gummanur"]
+    },
+    {
+      "query": "Who should I talk to about generative AI and prompt engineering",
+      "kind": "recall",
+      "relevant": ["martinmusiol1", "scak", "avinash-mahadevan-95b802249", "dinakar-selva", "hemesh-r-m", "kowsikperumalla", "adithiyan-pv-68639b258"]
+    },
+    {
+      "query": "People with an AWS certification",
+      "kind": "new",
+      "relevant": ["adithiyan-pv-68639b258", "amrita-laasya-8555541b5", "anantha-anil-teja", "gnapikasindhu"]
+    },
+    {
+      "query": "People who have a Microsoft Azure certification",
+      "kind": "new",
+      "relevant": ["srisuryachunchu"]
+    },
+    {
+      "query": "People who speak Spanish",
+      "kind": "new",
+      "relevant": ["anantha-anil-teja", "martinmusiol1", "sai-yaswanth-reddy-suram-5256872a4", "vt9baaaa1b5", "vineeth3101"]
+    },
+    {
+      "query": "People who speak Japanese or German",
+      "kind": "new",
+      "relevant": ["aashish-pahwa", "reaperdhan", "suraj2003s", "shriya-kotala", "gnapikasindhu", "martinmusiol1", "pranavraheja"]
+    },
+    {
+      "query": "People who have published research papers",
+      "kind": "new",
+      "relevant": ["adithiyan-pv-68639b258", "amrita-laasya-8555541b5", "anbazhagan-ezhil", "scak", "asifp0209", "avinash-mahadevan-95b802249", "bharathraj-s", "balajivemula2002", "battula1", "dinakar-selva", "gnapikasindhu", "haree-krishna-863b16271", "jasnoor-singh-mac", "kaif-ahmed-r", "kavyasri2302", "koushik-kourikanti-704030212", "phanishanmukh", "manishyerram", "manogna25"]
+    },
+    {
+      "query": "Graduate research assistants and teaching assistants",
+      "kind": "recall",
+      "relevant": ["harika-chinnam-a8521a222", "hemanthponraj", "jasnoor-singh-mac", "kalyani-muske-420562232", "suryac789", "venkata-dheeraj", "sricharantreddy", "kuldeep-kharb", "thirunavukkarasu-palaniappa-28194228b"]
+    }
+  ]
+}
