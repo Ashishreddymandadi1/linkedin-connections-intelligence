@@ -163,6 +163,24 @@ def find_person_by_public_id(db: Session, dataset_id: str, public_id: str) -> Pe
     ).first()
 
 
+def company_name_index(db: Session, dataset_id: str) -> dict[str, set[str]]:
+    """``{normalized company name -> {company_id, …}}`` across the dataset's
+    experiences — used to resolve a company criterion to a LinkedIn company id."""
+    rows = db.execute(
+        select(Experience.company_name, Experience.company_id)
+        .join(Person, Person.id == Experience.person_id)
+        .where(Person.dataset_id == dataset_id)
+        .where(Experience.company_id.is_not(None))
+        .where(Experience.company_name.is_not(None))
+    ).all()
+    from app.services.matching import norm_company
+
+    idx: dict[str, set[str]] = {}
+    for name, cid in rows:
+        idx.setdefault(norm_company(name), set()).add(cid)
+    return idx
+
+
 # ─────────────────── profile parts ───────────────────
 
 

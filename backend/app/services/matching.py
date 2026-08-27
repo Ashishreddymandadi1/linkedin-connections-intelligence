@@ -69,6 +69,56 @@ def token_overlap(a: str | None, b: str | None) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+# ─────────────────── recency / duration weighting (v2) ───────────────────
+
+_RECENCY_FLOOR = 0.6
+
+
+def _current_year() -> int:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).year
+
+
+def recency_factor(end_year: int | None, is_current: bool) -> float:
+    """How much to trust a signal given how long ago the role ended."""
+    if is_current or end_year is None:
+        return 1.0
+    age = _current_year() - end_year
+    if age <= 3:
+        return 1.0
+    if age <= 6:
+        return 0.9
+    if age <= 10:
+        return 0.78
+    return 0.65
+
+
+def duration_factor(start_year: int | None, end_year: int | None, is_current: bool) -> float:
+    """Longer tenure => stronger signal."""
+    if start_year is None:
+        return 1.0
+    end = _current_year() if (is_current or end_year is None) else end_year
+    years = max(0, end - start_year)
+    if years >= 3:
+        return 1.0
+    if years >= 1.5:
+        return 0.92
+    return 0.82
+
+
+def experience_weight(exp, *, enabled: bool = True) -> float:
+    """Combined recency×duration multiplier for a matched experience, floored so a
+    real match never collapses to noise."""
+    if not enabled:
+        return 1.0
+    f = recency_factor(getattr(exp, "end_year", None), getattr(exp, "is_current", False))
+    f *= duration_factor(
+        getattr(exp, "start_year", None), getattr(exp, "end_year", None), getattr(exp, "is_current", False)
+    )
+    return max(_RECENCY_FLOOR, f)
+
+
 _SENIORITY_RANK = {
     "intern": 0,
     "entry": 1,

@@ -98,7 +98,10 @@ def _facts(person, exps=None, edu=None, skills=None, semantic=None):
     )
 
 
-def test_exact_past_company_beats_partial_title():
+def test_exact_past_company_beats_partial_title(monkeypatch):
+    # isolate criterion logic from the v2 relevance component / recency decay
+    monkeypatch.setattr("app.services.scoring.settings.relevance_weight", 0.0)
+    monkeypatch.setattr("app.services.scoring.settings.recency_weighting_enabled", False)
     from app.schemas import ParsedSearchQuery, SearchCriterion
 
     parsed = ParsedSearchQuery(
@@ -116,6 +119,19 @@ def test_exact_past_company_beats_partial_title():
     amazon = next(c for c in scored.components if c.criterion_id == "past_amazon")
     assert amazon.match_strength == 1.0 and amazon.score == 60
     assert scored.match_score > 90
+
+
+def test_recency_downweights_an_old_short_role(monkeypatch):
+    monkeypatch.setattr("app.services.scoring.settings.relevance_weight", 0.0)
+    from app.schemas import ParsedSearchQuery, SearchCriterion
+
+    parsed = ParsedSearchQuery(criteria=[SearchCriterion(id="c", type="past_company", value="Oracle", weight=100)])
+    recent = _Exp("Engineer", "Oracle", 2022, 2026, False)
+    old_short = _Exp("Intern", "Oracle", 2013, 2013, False)
+    s_recent = score_candidate(_facts(_Person(), exps=[recent]), parsed)
+    s_old = score_candidate(_facts(_Person(), exps=[old_short]), parsed)
+    assert s_recent.match_score > s_old.match_score
+    assert s_old.match_score >= 60  # floored — an old match is still a match
 
 
 def test_required_criterion_excludes_non_match():
@@ -142,7 +158,9 @@ def test_inferred_skill_scores_below_explicit():
         _facts(_Person(), semantic={"inferred_skills": [{"skill": "Kubernetes", "confidence": 0.8, "evidence": "ran k8s clusters"}]}),
         parsed,
     )
-    assert explicit.match_score == 100
+    # criteria max is (100 - relevance_weight); no query embedding in this unit test
+    k8s_explicit = next(c for c in explicit.components if c.criterion_id == "k8s")
+    assert k8s_explicit.match_strength == 1.0
     assert inferred.match_score < explicit.match_score
     assert inferred.match_score > 0
 

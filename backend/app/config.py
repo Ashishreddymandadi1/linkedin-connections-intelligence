@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     llm_reason_generation: bool = True     # False -> deterministic reason templates
     llm_reason_top_n: int = 8              # LLM reasons for the top N; template for the rest
 
+    # ── Search quality v2 ────────────────────────────────────
+    relevance_weight: float = 20.0         # points reserved for whole-profile relevance
+    reranker_enabled: bool = True
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    rerank_pool: int = 40                  # candidates re-scored by the cross-encoder
+    rerank_blend: float = 0.6             # cross-encoder share within the relevance component
+    llm_rerank_enabled: bool = False       # opt-in LLM reorder of the final top 20
+    recency_weighting_enabled: bool = True
+    company_id_matching: bool = True
+
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     log_level: str = "INFO"

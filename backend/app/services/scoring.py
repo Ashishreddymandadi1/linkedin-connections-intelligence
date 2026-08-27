@@ -11,11 +11,13 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from app import repositories as repo
+from app.config import settings
 from app.constants import CriterionType, SkillSource
 from app.models import Person
 from app.schemas import EvidenceItem, ParsedSearchQuery, ScoreComponent, SearchCriterion
 from app.services.matching import (
     company_matches,
+    experience_weight,
     norm,
     norm_company,
     phrase_matches,
@@ -25,6 +27,17 @@ from app.services.matching import (
 
 _REQUIRED_MIN = 0.15
 _MATCHED_MIN = 0.2
+
+
+@dataclass
+class ScoringContext:
+    """Per-search signals shared across candidates."""
+
+    query_embedding: bytes | None = None
+    #: person_id -> cross-encoder relevance in [0,1] (filled for the rerank pool)
+    reranker_scores: dict[str, float] = field(default_factory=dict)
+    #: criterion_id -> resolved company_ids for company criteria
+    company_ids_by_criterion: dict[str, set[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,30 +91,41 @@ def load_facts(db: Session, person: Person) -> ProfileFacts:
 # ─────────────────────── per-criterion strategies ───────────────────────
 
 
-def _score_company(facts: ProfileFacts, value: str, *, want_current: bool | None) -> tuple[float, list[EvidenceItem]]:
+def _score_company(
+    facts: ProfileFacts,
+    value: str,
+    *,
+    want_current: bool | None,
+    resolved_ids: set[str] | None = None,
+) -> tuple[float, list[EvidenceItem]]:
     best = 0.0
     ev: list[EvidenceItem] = []
+    recency_on = settings.recency_weighting_enabled
     for e in facts.experiences:
-        if not company_matches(e.company_name, value):
+        by_id = bool(resolved_ids) and bool(e.company_id) and e.company_id in resolved_ids
+        if not by_id and not company_matches(e.company_name, value):
             continue
         item = EvidenceItem(
             type="experience",
             text=f"{e.position or 'Role'} at {e.company_name}"
-            + (f" ({e.start_year}–{e.end_year or 'present'})" if e.start_year else ""),
+            + (f" ({e.start_year}–{e.end_year or 'present'})" if e.start_year else "")
+            + (" — verified company" if by_id else ""),
             detail={
                 "company": e.company_name,
                 "title": e.position,
                 "start_year": e.start_year,
                 "end_year": e.end_year,
                 "is_current": e.is_current,
+                "verified": by_id,
             },
         )
         if want_current is True:
-            strength = 1.0 if e.is_current else 0.35
+            base = 1.0 if e.is_current else 0.35
         elif want_current is False:
-            strength = 1.0 if not e.is_current else 0.55
+            base = 1.0 if not e.is_current else 0.55
         else:
-            strength = 1.0
+            base = 1.0
+        strength = base * experience_weight(e, enabled=recency_on)
         if strength > best:
             best = strength
             ev = [item]
@@ -139,7 +163,10 @@ def _score_skill(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceI
     for e in facts.experiences:
         exp_skill_text = " ".join(e.skills_json) if e.skills_json else ""
         if phrase_matches(e.description, value) or phrase_matches(exp_skill_text, value):
-            return 0.6, [EvidenceItem(type="experience", text=f"referenced in the {e.company_name or 'role'} description", detail={})]
+            w = experience_weight(e, enabled=settings.recency_weighting_enabled)
+            return round(0.6 * w, 3), [
+                EvidenceItem(type="experience", text=f"referenced in the {e.company_name or 'role'} description", detail={})
+            ]
     for dom in sem.get("technical_domains", []) + sem.get("domain_expertise", []):
         if phrase_matches(dom, value):
             return 0.6, [EvidenceItem(type="semantic", text=f"domain: {dom}", detail={"inferred": True})]
@@ -288,9 +315,8 @@ def _score_keyword(facts: ProfileFacts, value: str) -> tuple[float, list[Evidenc
     return 0.0, []
 
 
+#: company types are handled directly in ``_score_one`` (they need ScoringContext).
 _STRATEGIES = {
-    CriterionType.CURRENT_COMPANY: lambda f, v: _score_company(f, v, want_current=True),
-    CriterionType.PAST_COMPANY: lambda f, v: _score_company(f, v, want_current=False),
     CriterionType.SKILL: _score_skill,
     CriterionType.DOMAIN: _score_domain,
     CriterionType.TITLE: _score_title,
@@ -304,29 +330,118 @@ _STRATEGIES = {
 }
 
 
-def _score_one(facts: ProfileFacts, crit: SearchCriterion) -> tuple[float, list[EvidenceItem]]:
-    strat = _STRATEGIES.get(crit.type, _score_keyword)
+def _score_one(
+    facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
+) -> tuple[float, list[EvidenceItem]]:
     try:
+        if crit.type == CriterionType.CURRENT_COMPANY:
+            return _score_company(
+                facts, crit.value, want_current=True,
+                resolved_ids=ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None,
+            )
+        if crit.type == CriterionType.PAST_COMPANY:
+            return _score_company(
+                facts, crit.value, want_current=False,
+                resolved_ids=ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None,
+            )
+        strat = _STRATEGIES.get(crit.type, _score_keyword)
         return strat(facts, crit.value)
     except Exception:  # noqa: BLE001 — a matcher bug must not kill a search
         return 0.0, []
 
 
-def score_candidate(facts: ProfileFacts, parsed: ParsedSearchQuery) -> ScoredCandidate:
+def _cosine_norm(query_emb: bytes | None, profile_emb: bytes | None) -> float:
+    if not query_emb or not profile_emb:
+        return 0.0
+    from app.services.embeddings import to_array
+
+    import numpy as np
+
+    q, v = to_array(query_emb), to_array(profile_emb)
+    if q.shape != v.shape:
+        return 0.0
+    cos = float(np.dot(q, v))
+    return max(0.0, min(1.0, cos / 0.6))  # treat cos>=0.6 as a perfect semantic match
+
+
+def _relevance_component(facts: ProfileFacts, ctx: ScoringContext, weight: float) -> ScoreComponent:
+    emb = _cosine_norm(ctx.query_embedding, facts.embedding)
+    ce = ctx.reranker_scores.get(facts.person.id)
+    if ce is not None:
+        strength = settings.rerank_blend * ce + (1 - settings.rerank_blend) * emb
+        note = "embedding + reranker"
+    else:
+        strength = emb
+        note = "embedding similarity"
+    strength = round(max(0.0, min(1.0, strength)), 3)
+    return ScoreComponent(
+        criterion="Overall relevance to your query",
+        criterion_id="relevance",
+        type="relevance",
+        weight=round(weight, 2),
+        match_strength=strength,
+        score=round(weight * strength, 2),
+        required=False,
+        evidence=[
+            EvidenceItem(
+                type="semantic",
+                text=f"Whole-profile semantic match to the query ({note})",
+                detail={"embedding": round(emb, 3), "reranker": round(ce, 3) if ce is not None else None},
+            )
+        ]
+        if strength > 0
+        else [],
+    )
+
+
+#: query types that are exact lookups — a strong one means the query is precise,
+#: so the fuzzy whole-profile relevance signal should not dilute it much.
+_EXACT_TYPES = {
+    CriterionType.CURRENT_COMPANY,
+    CriterionType.PAST_COMPANY,
+    CriterionType.EDUCATION,
+    CriterionType.CERTIFICATION,
+    CriterionType.LANGUAGE,
+    CriterionType.LOCATION,
+}
+
+
+def _effective_relevance_weight(parsed: ParsedSearchQuery) -> float:
+    base = max(0.0, min(60.0, settings.relevance_weight))
+    if not parsed.criteria or base == 0.0:
+        return 0.0
+    strongest_exact = max(
+        (c.weight for c in parsed.criteria if c.type in _EXACT_TYPES), default=0.0
+    )
+    if strongest_exact >= 55:
+        return base * 0.25   # precise lookup — relevance is a light tiebreak only
+    if strongest_exact >= 35:
+        return base * 0.55
+    return base
+
+
+def score_candidate(
+    facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContext | None = None
+) -> ScoredCandidate:
+    ctx = ctx or ScoringContext()
     components: list[ScoreComponent] = []
     all_evidence: list[EvidenceItem] = []
     matched: list[str] = []
     total = 0.0
 
+    rel_w = _effective_relevance_weight(parsed)
+    scale = (100.0 - rel_w) / 100.0
+
     for crit in parsed.criteria:
-        strength, ev = _score_one(facts, crit)
-        score = round(crit.weight * strength, 2)
+        strength, ev = _score_one(facts, crit, ctx)
+        eff_weight = crit.weight * scale
+        score = round(eff_weight * strength, 2)
         components.append(
             ScoreComponent(
                 criterion=_label(crit),
                 criterion_id=crit.id,
                 type=crit.type,
-                weight=round(crit.weight, 2),
+                weight=round(eff_weight, 2),
                 match_strength=round(strength, 3),
                 score=score,
                 required=crit.required,
@@ -345,6 +460,13 @@ def score_candidate(facts: ProfileFacts, parsed: ParsedSearchQuery) -> ScoredCan
         if strength >= _MATCHED_MIN:
             matched.append(crit.value)
             all_evidence.extend(ev)
+
+    if rel_w > 0:
+        rc = _relevance_component(facts, ctx, rel_w)
+        components.append(rc)
+        total += rc.score
+        if rc.match_strength >= 0.55:
+            all_evidence.extend(rc.evidence)
 
     return ScoredCandidate(
         person=facts.person,

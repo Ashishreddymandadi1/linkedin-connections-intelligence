@@ -1,6 +1,6 @@
 {
   "dataset_id": "dataset_6e11b665b23c",
-  "notes": "Labelled queries against the real 187-profile network. `relevant` = public_identifiers judged clearly relevant (by inspecting the enriched data). `kind`: precision = small clean answer set; recall = large set, measure recall@20 + top-k purity; new = needs a capability added in v2 (baseline expected ~0).",
+  "notes": "Labelled queries against the real 187-profile network. `relevant` = public_identifiers judged clearly relevant (by inspecting the enriched data). `kind`: precision = small clean answer set (trustworthy signal); recall = large set where `relevant` is only a SPARSE sample, so recall@20/MRR here are noisy — any reordering among equally-valid matches moves them; new = capability added in v2 (baseline ~0). Weight precision + new when judging changes.",
   "queries": [
     {
       "query": "People who work at Tata Consultancy Services",
