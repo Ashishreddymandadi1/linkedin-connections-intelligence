@@ -59,6 +59,8 @@ export const api = {
 
   getSearch: (searchId: string) => req<SearchResponse>(`/search/${searchId}`),
 
+  exportUrl: (datasetId: string) => `${BASE}/datasets/${datasetId}/export`,
+
   searchHistory: (datasetId: string) =>
     req<
       Array<{

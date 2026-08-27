@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+import re
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app import repositories as repo
@@ -71,6 +73,24 @@ def dataset_status(dataset_id: str, db: Session = Depends(get_db)) -> DatasetSta
     if not d:
         raise HTTPException(404, "dataset not found")
     return build_status_report(db, d)
+
+
+@router.get("/{dataset_id}/export")
+def export_dataset(dataset_id: str, db: Session = Depends(get_db)) -> Response:
+    d = repo.get_dataset(db, dataset_id)
+    if not d:
+        raise HTTPException(404, "dataset not found")
+
+    from app.services.export_service import build_workbook
+
+    xlsx = build_workbook(db, d)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", d.name or "network").strip("_") or "network"
+    stamp = d.updated_at.strftime("%Y%m%d")
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe}_{stamp}.xlsx"'},
+    )
 
 
 @router.delete("/{dataset_id}", status_code=204)

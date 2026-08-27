@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search as SearchIcon, Trash2 } from "lucide-react";
+import { Download, Search as SearchIcon, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import { Button, Card, StatCard } from "../components/ui";
 import { clearCurrentDataset } from "../store";
@@ -39,12 +39,26 @@ export default function DashboardPage() {
             Last updated {s?.last_updated ? new Date(s.last_updated).toLocaleString() : "—"}
           </p>
         </div>
-        <Button variant="danger" onClick={del}>
-          <span className="flex items-center gap-1.5">
-            <Trash2 size={14} /> Delete
-          </span>
-        </Button>
+        <div className="flex items-center gap-2">
+          <a
+            href={api.exportUrl(datasetId)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-ink transition hover:bg-slate-50"
+          >
+            <Download size={14} /> Download Excel
+          </a>
+          <Button variant="danger" onClick={del}>
+            <span className="flex items-center gap-1.5">
+              <Trash2 size={14} /> Delete
+            </span>
+          </Button>
+        </div>
       </div>
+
+      {s && s.ready > 0 && (
+        <p className="mt-2 text-xs text-ink-faint">
+          Excel includes {s.ready + s.partial} enriched profiles across 4 sheets (Profiles, Experiences, Education, Skills).
+        </p>
+      )}
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="Connections" value={s?.connections ?? "—"} />
