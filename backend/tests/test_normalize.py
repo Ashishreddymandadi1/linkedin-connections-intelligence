@@ -92,3 +92,29 @@ def test_empty_profile_lowers_completeness():
 def test_skill_name_normalization():
     assert normalize_skill_name("Amazon Web Services (AWS)") == "aws"
     assert normalize_skill_name("Go (Programming Language)") == "go"
+
+
+def test_extra_sections_extracted():
+    raw = {
+        "publicIdentifier": "x",
+        "certifications": [
+            {"title": "AWS Certified Solutions Architect", "issuedBy": "Amazon Web Services", "issuedAt": "2022"},
+            {"name": "no title key", "authority": "Somewhere"},
+        ],
+        "languages": [{"name": "English", "proficiency": "Native"}, "Spanish", {"proficiency": "only prof"}],
+        "publications": [
+            {"title": "A Paper on X", "publishedAt": "Journal of Y · Jan 2024", "link": "http://x"},
+        ],
+        "receivedRecommendations": [
+            {"givenBy": "Jane Doe", "givenByHeadline": "CTO", "text": "Great engineer.", "givenAt": "2021"},
+        ],
+        "patents": None,
+    }
+    n = normalize_profile(raw)
+    assert len(n["certifications"]) == 2
+    assert n["certifications"][0]["issuer"] == "Amazon Web Services"
+    langs = {row["name"] for row in n["languages"]}
+    assert langs == {"English", "Spanish"}
+    assert n["publications"][0]["publisher"] == "Journal of Y"
+    assert n["recommendations"][0]["recommender_name"] == "Jane Doe"
+    assert n["patents"] == []

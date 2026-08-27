@@ -201,6 +201,85 @@ class Skill(Base):
     evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class Certification(Base):
+    __tablename__ = "certifications"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("cert"))
+    person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    issuer: Mapped[str | None] = mapped_column(String, nullable=True)
+    issuer_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    issued_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    credential_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Publication(Base):
+    __tablename__ = "publications"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("pub"))
+    person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    publisher: Mapped[str | None] = mapped_column(String, nullable=True)
+    published_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Patent(Base):
+    __tablename__ = "patents"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("pat"))
+    person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    number: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)
+    issued_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Language(Base):
+    __tablename__ = "languages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("lang"))
+    person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String, index=True)
+    name_norm: Mapped[str] = mapped_column(String, index=True)
+    proficiency: Mapped[str | None] = mapped_column(String, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Volunteering(Base):
+    __tablename__ = "volunteering"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("vol"))
+    person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str | None] = mapped_column(String, nullable=True)
+    organization: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    cause: Mapped[str | None] = mapped_column(String, nullable=True)
+    start_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Recommendation(Base):
+    __tablename__ = "recommendations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("rec"))
+    person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    recommender_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    recommender_headline: Mapped[str | None] = mapped_column(String, nullable=True)
+    relationship: Mapped[str | None] = mapped_column(String, nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    given_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class ProfileSemantic(Base):
     """LLM-derived interpretation of one profile (spec §26). Cached by version."""
 

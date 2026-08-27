@@ -352,6 +352,7 @@ def _normalize_step(db: Session, p: Person) -> None:
     repo.replace_experiences(db, p.id, normalized["experiences"])
     repo.replace_education(db, p.id, normalized["education"])
     repo.replace_skills(db, p.id, normalized["skills"])
+    repo.replace_extra_sections(db, p.id, normalized)
 
     score, detail = compute_completeness(normalized, raw.raw_json)
     p.profile_completeness = score

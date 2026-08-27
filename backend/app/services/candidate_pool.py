@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.constants import CriterionType, EnrichmentState
-from app.models import Education, Experience, Person, Skill
+from app.models import Certification, Education, Experience, Language, Person, Publication, Skill
 from app.schemas import ParsedSearchQuery
 from app.services.matching import norm
 
@@ -90,6 +90,24 @@ def _sql_prefilter(db: Session, dataset_id: str, parsed: ParsedSearchQuery) -> s
             ids |= _q(
                 db,
                 select(Person.id).where(Person.dataset_id == dataset_id).where(Person.current_title.ilike(v)),
+            )
+        elif crit.type == CriterionType.CERTIFICATION:
+            ids |= _q(
+                db,
+                select(Certification.person_id).where(
+                    or_(Certification.name.ilike(v), Certification.issuer.ilike(v))
+                ),
+            )
+        elif crit.type == CriterionType.LANGUAGE:
+            for tok in norm(crit.value).split():
+                if len(tok) > 1:
+                    ids |= _q(db, select(Language.person_id).where(Language.name_norm.ilike(f"%{tok}%")))
+        elif crit.type == CriterionType.PUBLICATION:
+            ids |= _q(
+                db,
+                select(Publication.person_id).where(
+                    or_(Publication.title.ilike(v), Publication.description.ilike(v))
+                ),
             )
         else:
             ids |= _q(

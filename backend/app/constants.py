@@ -75,6 +75,9 @@ class CriterionType:
     LOCATION = "location"
     SENIORITY = "seniority"
     KEYWORD = "keyword"
+    CERTIFICATION = "certification"
+    LANGUAGE = "language"
+    PUBLICATION = "publication"
 
 
 ALL_CRITERION_TYPES = {

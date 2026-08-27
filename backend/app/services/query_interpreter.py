@@ -30,8 +30,11 @@ _KNOWN_SKILLS = {
 _SYSTEM = (
     "You convert a recruiter/networking search into weighted structured criteria. "
     "Output JSON only. Each criterion has: id (short slug), type (one of "
-    "current_company, past_company, skill, domain, title, education, location, seniority, keyword), "
+    "current_company, past_company, skill, domain, title, education, location, seniority, "
+    "certification, language, publication, keyword), "
     "value (the concrete thing to match), weight (number), required (boolean). "
+    "Use `certification` for 'has an AWS cert' (value 'AWS'), `language` for 'speaks "
+    "Mandarin' (value 'Mandarin'), `publication` for 'has published' (value '' or the topic). "
     "The query's own emphasis decides the weights — 'people who went to Stanford' is mostly an "
     "education criterion; 'backend engineers currently at Microsoft' weights current_company and "
     "title highly. A criterion is required only when the query clearly demands it "
@@ -119,6 +122,19 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
         field = m.group(1).strip()
         if field and len(field) > 2:
             crits.append(SearchCriterion(id=f"field_{_slug(field)}", type=CriterionType.EDUCATION, value=field, weight=25, required=False))
+
+    for m in re.finditer(r"([A-Za-z][\w+.\- ]{1,30}?)\s+(?:certified|certification|cert)\b", q, re.I):
+        val = _clean_name(m.group(1))
+        if val and val.lower() not in used_spans:
+            crits.append(SearchCriterion(id=f"cert_{_slug(val)}", type=CriterionType.CERTIFICATION, value=val, weight=35, required=False))
+            used_spans.append(val.lower())
+    for m in re.finditer(r"\bspeaks?\s+([A-Za-z]+(?:\s+(?:or|and)\s+[A-Za-z]+)*)", q, re.I):
+        val = m.group(1).strip()
+        crits.append(SearchCriterion(id=f"lang_{_slug(val)}", type=CriterionType.LANGUAGE, value=val, weight=40, required=False))
+    if re.search(r"\b(publish(?:ed|es)?|publication|research paper|wrote a paper)\b", ql):
+        topic_m = re.search(r"publish(?:ed)?(?:\s+(?:research|papers?|on))?\s+(?:on\s+|about\s+)?([a-z][\w ]{2,40})", ql)
+        topic = topic_m.group(1).strip() if topic_m else ""
+        crits.append(SearchCriterion(id="pub", type=CriterionType.PUBLICATION, value=topic, weight=30, required=False))
 
     if not any(c.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY) for c in crits):
         for m in _AT_RE.finditer(q + " "):

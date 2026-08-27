@@ -12,19 +12,36 @@ from sqlalchemy.orm import Session
 
 from app.constants import EnrichmentState
 from app.models import (
+    Certification,
     Connection,
     Dataset,
     Education,
     EnrichmentJob,
     Experience,
+    Language,
+    Patent,
     Person,
     ProfileEmbedding,
     ProfileSemantic,
+    Publication,
     RawProfile,
+    Recommendation,
     SearchQuery,
     SearchResult,
     Skill,
+    Volunteering,
 )
+
+#: extra profile sections broken out in v2 — model class keyed by the dict key
+#: that ``normalize_profile`` returns them under.
+EXTRA_SECTION_MODELS = {
+    "certifications": Certification,
+    "publications": Publication,
+    "patents": Patent,
+    "languages": Language,
+    "volunteering": Volunteering,
+    "recommendations": Recommendation,
+}
 
 # ─────────────────────────── datasets ───────────────────────────
 
@@ -188,6 +205,35 @@ def get_education(db: Session, person_id: str) -> list[Education]:
 
 def get_skills(db: Session, person_id: str) -> list[Skill]:
     return list(db.scalars(select(Skill).where(Skill.person_id == person_id)))
+
+
+def replace_extra_sections(db: Session, person_id: str, normalized: dict) -> None:
+    """Replace all v2 sub-section rows (certifications/publications/…) for a person."""
+    for key, model in EXTRA_SECTION_MODELS.items():
+        db.execute(delete(model).where(model.person_id == person_id))
+        for i, row in enumerate(normalized.get(key, []) or []):
+            db.add(model(person_id=person_id, order_index=i, **row))
+    db.flush()
+
+
+def get_extra_section(db: Session, person_id: str, key: str) -> list:
+    model = EXTRA_SECTION_MODELS[key]
+    stmt = select(model).where(model.person_id == person_id)
+    if hasattr(model, "order_index"):
+        stmt = stmt.order_by(model.order_index)
+    return list(db.scalars(stmt))
+
+
+def get_certifications(db: Session, person_id: str) -> list[Certification]:
+    return get_extra_section(db, person_id, "certifications")
+
+
+def get_languages(db: Session, person_id: str) -> list[Language]:
+    return get_extra_section(db, person_id, "languages")
+
+
+def get_publications(db: Session, person_id: str) -> list[Publication]:
+    return get_extra_section(db, person_id, "publications")
 
 
 # ─────────────────── raw / semantic / embedding ───────────────────

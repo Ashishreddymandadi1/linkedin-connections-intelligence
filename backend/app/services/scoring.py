@@ -35,6 +35,9 @@ class ProfileFacts:
     skills: list
     semantic: dict
     embedding: bytes | None
+    certifications: list = field(default_factory=list)
+    languages: list = field(default_factory=list)
+    publications: list = field(default_factory=list)
 
     @property
     def skill_norms(self) -> dict[str, object]:
@@ -66,6 +69,9 @@ def load_facts(db: Session, person: Person) -> ProfileFacts:
         skills=repo.get_skills(db, person.id),
         semantic=(sem.data if sem and sem.data else {}),
         embedding=emb,
+        certifications=repo.get_certifications(db, person.id),
+        languages=repo.get_languages(db, person.id),
+        publications=repo.get_publications(db, person.id),
     )
 
 
@@ -219,6 +225,55 @@ def _score_seniority(facts: ProfileFacts, value: str) -> tuple[float, list[Evide
     return 0.0, []
 
 
+def _score_certification(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
+    for c in facts.certifications:
+        hay = " ".join(filter(None, [c.name, c.issuer]))
+        if phrase_matches(hay, value) or phrase_matches(value, c.name or ""):
+            return 1.0, [
+                EvidenceItem(
+                    type="certification",
+                    text=f"{c.name}" + (f" — {c.issuer}" if c.issuer else "") + " (certification)",
+                    detail={"issuer": c.issuer, "issued_at": c.issued_at},
+                )
+            ]
+    # a bare cert-provider query ("AWS certification") also matches issuer text
+    for c in facts.certifications:
+        toks = [t for t in norm(value).split() if t not in {"certification", "certified", "cert", "certificate"}]
+        if toks and all(t in norm(f"{c.name} {c.issuer}") for t in toks):
+            return 0.9, [EvidenceItem(type="certification", text=f"{c.name} (certification)", detail={})]
+    return 0.0, []
+
+
+def _score_language(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
+    wanted = {t for t in norm(value).replace(" or ", " ").replace(" and ", " ").split() if len(t) > 1}
+    wanted -= {"speaks", "speak", "language", "languages", "fluent", "native"}
+    for lang in facts.languages:
+        if lang.name_norm in wanted or any(w in lang.name_norm for w in wanted):
+            return 1.0, [
+                EvidenceItem(
+                    type="language",
+                    text=f"speaks {lang.name}" + (f" ({lang.proficiency})" if lang.proficiency else ""),
+                    detail={"proficiency": lang.proficiency},
+                )
+            ]
+    return 0.0, []
+
+
+def _score_publication(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
+    if not facts.publications:
+        return 0.0, []
+    generic = {"published", "publication", "publications", "research", "paper", "papers", "author", "wrote"}
+    topical = [t for t in norm(value).split() if t not in generic and len(t) > 2]
+    if not topical:
+        p = facts.publications[0]
+        return 0.85, [EvidenceItem(type="publication", text=f'published "{(p.title or "")[:90]}"', detail={"count": len(facts.publications)})]
+    for p in facts.publications:
+        hay = norm(f"{p.title} {p.description or ''}")
+        if sum(1 for t in topical if t in hay) / len(topical) >= 0.5:
+            return 1.0, [EvidenceItem(type="publication", text=f'published "{(p.title or "")[:90]}"', detail={})]
+    return 0.4, [EvidenceItem(type="publication", text=f"has {len(facts.publications)} publication(s)", detail={})]
+
+
 def _score_keyword(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
     parts = [
         facts.person.headline,
@@ -243,6 +298,9 @@ _STRATEGIES = {
     CriterionType.LOCATION: _score_location,
     CriterionType.SENIORITY: _score_seniority,
     CriterionType.KEYWORD: _score_keyword,
+    CriterionType.CERTIFICATION: _score_certification,
+    CriterionType.LANGUAGE: _score_language,
+    CriterionType.PUBLICATION: _score_publication,
 }
 
 
@@ -308,6 +366,9 @@ def _label(c: SearchCriterion) -> str:
         CriterionType.LOCATION: f"Located in {c.value}",
         CriterionType.SENIORITY: f"{c.value.title()} level",
         CriterionType.KEYWORD: c.value,
+        CriterionType.CERTIFICATION: f"{c.value} certification",
+        CriterionType.LANGUAGE: f"Speaks {c.value}",
+        CriterionType.PUBLICATION: f"Published on {c.value}" if c.value else "Has publications",
     }
     return pretty.get(c.type, c.value)
 

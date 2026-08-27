@@ -23,7 +23,10 @@ def test_export_xlsx_has_four_sheets_and_profile_rows(client):
     assert r.headers["content-disposition"].endswith('.xlsx"')
 
     wb = load_workbook(io.BytesIO(r.content))
-    assert wb.sheetnames == ["Profiles", "Experiences", "Education", "Skills"]
+    assert wb.sheetnames == [
+        "Profiles", "Experiences", "Education", "Skills",
+        "Certifications", "Languages", "Publications",
+    ]
 
     prof = wb["Profiles"]
     assert prof.max_row >= 6  # 5 fixtures + synthesized

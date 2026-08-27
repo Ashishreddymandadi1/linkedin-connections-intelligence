@@ -86,6 +86,15 @@ def build_workbook(db: Session, dataset: Dataset) -> bytes:
         wb, "Skills",
         ["Person", "LinkedIn URL", "Skill", "Source", "Inferred", "Confidence", "Evidence"],
     )
+    cert_ws = _sheet(
+        wb, "Certifications",
+        ["Person", "LinkedIn URL", "Certification", "Issuer", "Issued", "URL"],
+    )
+    lang_ws = _sheet(wb, "Languages", ["Person", "LinkedIn URL", "Language", "Proficiency"])
+    pub_ws = _sheet(
+        wb, "Publications",
+        ["Person", "LinkedIn URL", "Title", "Publisher", "Published", "URL"],
+    )
 
     for p in people:
         exps = repo.get_experiences(db, p.id)
@@ -149,6 +158,12 @@ def build_workbook(db: Session, dataset: Dataset) -> bytes:
                 p.full_name, p.linkedin_url, sk.skill_name, sk.source,
                 _yn(sk.is_inferred), round(sk.confidence, 2), sk.evidence,
             ])
+        for c in repo.get_certifications(db, p.id):
+            cert_ws.append([p.full_name, p.linkedin_url, c.name, c.issuer, c.issued_at, c.url])
+        for lang in repo.get_languages(db, p.id):
+            lang_ws.append([p.full_name, p.linkedin_url, lang.name, lang.proficiency])
+        for pub in repo.get_publications(db, p.id):
+            pub_ws.append([p.full_name, p.linkedin_url, pub.title, pub.publisher, pub.published_at, pub.url])
 
     for ws in wb.worksheets:
         _autosize(ws)

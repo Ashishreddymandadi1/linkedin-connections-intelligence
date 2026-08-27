@@ -259,7 +259,126 @@ def normalize_profile(raw: dict) -> dict:
             person["current_company"] = _s(cp[0].get("companyName"))
     person.update(current)
 
-    return {"person": person, "experiences": exp, "education": edu, "skills": skills}
+    return {
+        "person": person,
+        "experiences": exp,
+        "education": edu,
+        "skills": skills,
+        "certifications": _certification_rows(raw),
+        "publications": _publication_rows(raw),
+        "patents": _patent_rows(raw),
+        "languages": _language_rows(raw),
+        "volunteering": _volunteering_rows(raw),
+        "recommendations": _recommendation_rows(raw),
+    }
+
+
+# ─────────────────── extra profile sections (spec §18) ───────────────────
+
+
+def _certification_rows(raw: dict) -> list[dict]:
+    rows: list[dict] = []
+    for c in _list(raw.get("certifications")):
+        if not isinstance(c, dict):
+            continue
+        rows.append(
+            {
+                "name": _s(c.get("title") or c.get("name")),
+                "issuer": _s(c.get("issuedBy") or c.get("authority") or c.get("issuer")),
+                "issuer_url": _s(c.get("issuedByLink") or c.get("authorityLink")),
+                "issued_at": _s(c.get("issuedAt") or c.get("issueDate") or c.get("date")),
+                "credential_id": _s(c.get("credentialId") or c.get("licenseNumber")),
+                "url": _s(c.get("link") or c.get("credentialUrl") or c.get("url")),
+            }
+        )
+    return [r for r in rows if r["name"]]
+
+
+def _publication_rows(raw: dict) -> list[dict]:
+    rows: list[dict] = []
+    for p in _list(raw.get("publications")):
+        if not isinstance(p, dict):
+            continue
+        at = _s(p.get("publishedAt") or p.get("date"))
+        publisher = _s(p.get("publisher"))
+        if not publisher and at and "·" in at:
+            publisher = at.split("·")[0].strip() or None
+        rows.append(
+            {
+                "title": _s(p.get("title") or p.get("name")),
+                "publisher": publisher,
+                "published_at": at,
+                "url": _s(p.get("link") or p.get("url")),
+                "description": _s(p.get("description")),
+            }
+        )
+    return [r for r in rows if r["title"]]
+
+
+def _patent_rows(raw: dict) -> list[dict]:
+    rows: list[dict] = []
+    for p in _list(raw.get("patents")):
+        if not isinstance(p, dict):
+            continue
+        rows.append(
+            {
+                "title": _s(p.get("title") or p.get("name")),
+                "number": _s(p.get("patentNumber") or p.get("number")),
+                "status": _s(p.get("status")),
+                "issued_at": _s(p.get("issuedAt") or p.get("date")),
+                "url": _s(p.get("link") or p.get("url")),
+                "description": _s(p.get("description")),
+            }
+        )
+    return [r for r in rows if r["title"]]
+
+
+def _language_rows(raw: dict) -> list[dict]:
+    rows: list[dict] = []
+    for lang in _list(raw.get("languages")):
+        name = _s(lang.get("name")) if isinstance(lang, dict) else _s(lang)
+        if not name:
+            continue
+        prof = _s(lang.get("proficiency")) if isinstance(lang, dict) else None
+        rows.append({"name": name, "name_norm": name.lower(), "proficiency": prof})
+    return rows
+
+
+def _volunteering_rows(raw: dict) -> list[dict]:
+    rows: list[dict] = []
+    for v in _list(raw.get("volunteering") or raw.get("volunteeringExperiences")):
+        if not isinstance(v, dict):
+            continue
+        _, sy, _ = _date_parts(v.get("startDate") or v.get("start"))
+        _, ey, _ = _date_parts(v.get("endDate") or v.get("end"))
+        rows.append(
+            {
+                "role": _s(v.get("role") or v.get("title") or v.get("position")),
+                "organization": _s(v.get("organization") or v.get("companyName") or v.get("company")),
+                "cause": _s(v.get("cause")),
+                "start_year": sy,
+                "end_year": ey,
+                "description": _s(v.get("description")),
+            }
+        )
+    return [r for r in rows if r["role"] or r["organization"]]
+
+
+def _recommendation_rows(raw: dict) -> list[dict]:
+    rows: list[dict] = []
+    for r in _list(raw.get("receivedRecommendations") or raw.get("recommendations")):
+        if not isinstance(r, dict):
+            continue
+        rows.append(
+            {
+                "recommender_name": _s(r.get("givenBy") or r.get("recommenderName") or r.get("name")),
+                "recommender_headline": _s(r.get("givenByHeadline") or r.get("recommenderHeadline")),
+                "relationship": _s(r.get("relationship") or r.get("connection")),
+                "text": _s(r.get("text") or r.get("description") or r.get("recommendation")),
+                "given_at": _s(r.get("givenAt") or r.get("date")),
+            }
+        )
+    return [r for r in rows if r["recommender_name"] or r["text"]]
 
 
 def _int(v: Any) -> int | None:

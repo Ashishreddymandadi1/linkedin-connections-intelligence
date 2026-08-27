@@ -75,7 +75,13 @@
     { "title": "AWS Certified Solutions Architect – Associate", "issuedBy": "Amazon Web Services (AWS)", "issuedAt": "2022" }
   ],
   "projects": [],
-  "languages": [{ "name": "English", "proficiency": "Native or bilingual" }],
+  "publications": [
+    { "title": "Scaling a globally distributed key-value store", "publishedAt": "USENIX ATC · 2023", "link": "https://example.com/paper" }
+  ],
+  "languages": [
+    { "name": "English", "proficiency": "Native or bilingual" },
+    { "name": "Spanish", "proficiency": "Professional working" }
+  ],
   "receivedRecommendations": [],
   "moreProfiles": [
     { "publicIdentifier": "some-other-person", "name": "Chris Doe", "position": "Engineer at Google" }
