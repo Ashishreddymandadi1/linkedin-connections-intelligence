@@ -1,8 +1,9 @@
-"""Free-LLM fallback chain (spec §24–§25).
+"""LLM fallback chain (spec §24–§25).
 
-Groq 120B → Groq 20B → OpenRouter free → give up (caller queues the unit).
-Never calls a paid model. ``ENABLE_PAID_LLM`` exists only as a guard that this
-module refuses to honor.
+Default: Groq 120B → Groq 20B → OpenRouter free → give up (caller queues the unit).
+A paid Anthropic provider is added to the chain ONLY when ``ENABLE_PAID_LLM=true``
+and ``ANTHROPIC_API_KEY`` is set — an explicit operator opt-in. The app never
+reaches for a paid model on its own.
 """
 from __future__ import annotations
 
@@ -42,9 +43,6 @@ def generate_structured(
 ) -> tuple[T, str, str] | None:
     """Return ``(validated_model, provider_name, model_id)`` or ``None`` if every
     free provider is exhausted."""
-    if settings.enable_paid_llm:
-        log.warning("ENABLE_PAID_LLM is set but the router only ever uses free providers")
-
     providers = chain if chain is not None else default_chain()
     retries = max(0, settings.llm_max_retries)
     schema_hint = (

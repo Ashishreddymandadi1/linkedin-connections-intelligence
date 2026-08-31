@@ -23,14 +23,21 @@ class Settings(BaseSettings):
     apify_actor_id: str = "LpVuK3Zozwuipa5bp"
     apify_profile_scraper_mode: str = "Profile details no email ($4 per 1k)"
 
-    # ── LLM providers (free only) ────────────────────────────
+    # ── LLM providers ────────────────────────────────────────
     groq_api_key: str = ""
     openrouter_api_key: str = ""
     groq_primary_model: str = "openai/gpt-oss-120b"
     groq_fallback_model: str = "openai/gpt-oss-20b"
     openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
-    enable_paid_llm: bool = False
     llm_max_retries: int = 2
+
+    # Paid provider — only used when ENABLE_PAID_LLM=true AND a key is set. This is
+    # an explicit opt-in; the app never reaches for a paid model on its own.
+    enable_paid_llm: bool = False
+    anthropic_api_key: str = ""
+    anthropic_workspace_id: str = ""  # required for identity-linked keys
+    anthropic_model: str = "claude-haiku-4-5-20251001"
+    anthropic_first: bool = True  # when enabled, try Anthropic before the free tier
 
     # ── Embeddings (local) ───────────────────────────────────
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
