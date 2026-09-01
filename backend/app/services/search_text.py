@@ -1,6 +1,10 @@
-"""Build the compact searchable paragraph per profile (spec §28).
+"""Build the compact searchable paragraph per profile (spec §9, §28).
 
-Text only — no media URLs, no logos. Used for embeddings and keyword search.
+Text only — no media URLs, no logos. Used for embeddings and cross-encoder
+reranking. Describes professional MEANING (industries, job families,
+leadership, company categories, career summary) — not just a keyword dump —
+so semantic similarity can find "big tech engineering leader now at a
+startup" without those exact words ever appearing on the profile.
 """
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app import repositories as repo
 from app.models import Person
+from app.services.company_intel import company_key, get_or_classify
 
 
 def build_search_text(db: Session, person: Person) -> str:
@@ -39,6 +44,31 @@ def build_search_text(db: Session, person: Person) -> str:
         if e.description:
             parts.append(e.description[:400])
 
+    # company classifications — cache-only lookup, never triggers a new LLM
+    # call from the search/enrichment hot path (classification happens in its
+    # own backfill step).
+    companies = [(e.company_id, e.company_name, e.company_linkedin_url) for e in exps[:6] if e.company_name]
+    if companies:
+        keys = {company_key(cid, nm) for cid, nm, _ in companies}
+        classified = repo.get_company_semantics(db, list(keys))
+        cat_phrases = []
+        for cid, nm, _url in companies:
+            row = classified.get(company_key(cid, nm))
+            if not row:
+                continue
+            bits = []
+            if row.is_big_tech:
+                bits.append("a major technology company")
+            elif row.is_startup:
+                bits.append("an early-stage/independent company")
+            elif row.is_technology_company:
+                bits.append("a technology company")
+            if row.industries:
+                bits.append("in " + ", ".join(row.industries[:3]))
+            if bits:
+                cat_phrases.append(f"{nm} is " + " ".join(bits) + ".")
+        parts.extend(cat_phrases[:4])
+
     edus = repo.get_education(db, person.id)
     for ed in edus[:3]:
         seg = " ".join(
@@ -59,13 +89,28 @@ def build_search_text(db: Session, person: Person) -> str:
 
     sem = repo.get_semantic(db, person.id)
     if sem and sem.data:
-        kws = sem.data.get("searchable_keywords") or []
-        doms = sem.data.get("technical_domains") or []
-        extra = list(dict.fromkeys([*doms, *kws]))[:20]
+        d = sem.data
+        if d.get("seniority_level"):
+            parts.append(f"Seniority: {d['seniority_level']}.")
+        if d.get("current_role_summary"):
+            parts.append(d["current_role_summary"])
+        if d.get("career_summary"):
+            parts.append(d["career_summary"][:400])
+        if d.get("industries"):
+            parts.append("Industry experience: " + ", ".join(d["industries"][:6]) + ".")
+        if d.get("job_families"):
+            parts.append("Career includes: " + ", ".join(d["job_families"][:6]) + ".")
+        if d.get("leadership_experience"):
+            parts.append("Leadership: " + "; ".join(d["leadership_experience"][:4]) + ".")
+        if d.get("domain_expertise"):
+            parts.append("Domain expertise: " + ", ".join(d["domain_expertise"][:6]) + ".")
+        for assertion in (d.get("semantic_assertions") or [])[:6]:
+            concept = assertion.get("concept") if isinstance(assertion, dict) else None
+            if concept:
+                parts.append(concept + ".")
+        extra = list(dict.fromkeys([*(d.get("technical_domains") or []), *(d.get("searchable_keywords") or [])]))[:20]
         if extra:
             parts.append("Also: " + ", ".join(extra) + ".")
-        if sem.data.get("career_summary"):
-            parts.append(sem.data["career_summary"][:400])
 
     if person.about:
         parts.append(person.about[:600])

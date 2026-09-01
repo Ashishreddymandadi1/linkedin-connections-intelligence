@@ -1,8 +1,13 @@
-"""Build the compact, text-only profile payload for the LLM (spec §11–§12).
+"""Build the compact, text-only profile payload for the LLM (spec §8, §11–§12).
 
 Strips every image/logo/cover URL, tracking param and repeated company-metadata
 blob. HarvestAPI already gave us the structured facts — the LLM only needs the
 searchable text. Keeping this tight is what stays inside free token quotas.
+
+Reads from the NORMALIZED tables (not raw_json) for certifications/languages/
+publications so this stays consistent with the v2 sub-tables, and includes
+volunteering + recommendations — evidence for concepts like "mentor" or
+"leadership" often lives there, not in a skill named "mentor" (spec §8/§23).
 """
 from __future__ import annotations
 
@@ -16,14 +21,17 @@ def build_compact_profile(db: Session, person: Person) -> dict:
     exps = repo.get_experiences(db, person.id)
     edus = repo.get_education(db, person.id)
     skills = repo.get_skills(db, person.id)
-    raw = repo.latest_raw_profile(db, person.id)
-    raw_json = raw.raw_json if raw else {}
+    certs = repo.get_certifications(db, person.id)
+    langs = repo.get_languages(db, person.id)
+    pubs = repo.get_publications(db, person.id)
+    volunteering = repo.get_extra_section(db, person.id, "volunteering")
+    recommendations = repo.get_extra_section(db, person.id, "recommendations")
 
     return {
         "name": person.full_name,
         "headline": person.headline,
         "location": person.location_text,
-        "about": (person.about or "")[:1500] or None,
+        "about": (person.about or "")[:2200] or None,
         "current": {
             "title": person.current_title,
             "company": person.current_company,
@@ -37,10 +45,10 @@ def build_compact_profile(db: Session, person: Person) -> dict:
                 "is_current": e.is_current,
                 "employment_type": e.employment_type,
                 "location": e.location,
-                "description": (e.description or "")[:800] or None,
+                "description": (e.description or "")[:1200] or None,
                 "listed_skills": e.skills_json or [],
             }
-            for e in exps[:10]
+            for e in exps[:14]
         ],
         "education": [
             {
@@ -53,27 +61,15 @@ def build_compact_profile(db: Session, person: Person) -> dict:
             for ed in edus[:6]
         ],
         "explicit_skills": [s.skill_name for s in skills][:40],
-        "certifications": [
-            _s(c.get("title")) for c in _list(raw_json.get("certifications")) if isinstance(c, dict)
-        ][:15],
-        "languages": [
-            _s(x.get("name")) if isinstance(x, dict) else _s(x)
-            for x in _list(raw_json.get("languages"))
-        ][:10],
-        "publications": [
-            _s(p.get("title")) for p in _list(raw_json.get("publications")) if isinstance(p, dict)
-        ][:8],
+        "certifications": [c.name for c in certs if c.name][:15],
+        "languages": [lang.name for lang in langs if lang.name][:10],
+        "publications": [p.title for p in pubs if p.title][:8],
+        # evidence sources for leadership/mentorship/advising concepts (spec §8/§23)
+        "volunteering": [
+            {"role": v.role, "organization": v.organization, "description": (v.description or "")[:300]}
+            for v in volunteering[:8]
+        ],
+        "recommendations_received": [
+            (r.text or "")[:400] for r in recommendations[:5] if r.text
+        ],
     }
-
-
-def _list(v):
-    if v is None:
-        return []
-    return v if isinstance(v, list) else [v]
-
-
-def _s(v):
-    if v is None:
-        return None
-    s = str(v).strip()
-    return s or None

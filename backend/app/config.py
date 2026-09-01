@@ -59,7 +59,9 @@ class Settings(BaseSettings):
 
     # ── Semantic enrichment ──────────────────────────────────
     semantic_enabled: bool = True  # False -> skip the LLM profile pass entirely
-    semantic_profile_version: int = 1
+    #: v2 added semantic_assertions[] — bump forces a backfill (no Apify re-scrape,
+    #: see repositories.people_missing_semantics(current_version=...)).
+    semantic_profile_version: int = 2
 
     # ── Search ───────────────────────────────────────────────
     candidate_pool_size: int = 60
