@@ -23,7 +23,11 @@ def enrich_dataset(
         raise HTTPException(404, "dataset not found")
 
     from app.config import settings
-    from app.services.enrichment_runner import backfill_semantics, start_enrichment
+    from app.services.enrichment_runner import (
+        backfill_semantics,
+        classify_companies,
+        start_enrichment,
+    )
 
     pending = repo.people_needing_enrichment(db, dataset_id)
     if pending:
@@ -32,11 +36,17 @@ def enrich_dataset(
         background.add_task(start_enrichment, dataset_id, job.id)
         return {"started": True, "mode": "enrich", "job_id": job.id, "pending": len(pending)}
 
-    # nothing left to scrape — but semantics may have been deferred by rate limits
-    missing_sem = repo.people_missing_semantics(db, dataset_id)
+    # nothing left to scrape — but the semantic layer may be missing or stale
+    # (deferred by rate limits, or predating a semantic_profile_version bump).
+    missing_sem = repo.people_missing_semantics(
+        db, dataset_id, current_version=settings.semantic_profile_version
+    )
     if missing_sem and settings.semantic_enabled:
         job = repo.create_job(db, dataset_id, actor_id=settings.apify_actor_id, requested=len(missing_sem))
         db.commit()
+        # classify employers first (no Apify) so company_category scoring has data,
+        # then (re)run the semantic pass + re-embed.
+        background.add_task(classify_companies, dataset_id, None)
         background.add_task(backfill_semantics, dataset_id, job.id)
         return {"started": True, "mode": "backfill_semantics", "job_id": job.id, "pending": len(missing_sem)}
 

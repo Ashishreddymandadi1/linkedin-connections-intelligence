@@ -46,15 +46,42 @@ def start_enrichment(dataset_id: str, job_id: str) -> None:
         db.close()
 
 
+def classify_companies(dataset_id: str, job_id: str | None = None) -> None:
+    """Background task (spec §4/§37): classify every distinct employer in the
+    dataset once, cached forever. No Apify — reads stored experiences."""
+    db = SessionLocal()
+    try:
+        from app.services.company_intel import get_or_classify
+
+        companies = repo.distinct_companies(db, dataset_id)
+        log.info("company classification: %d distinct employers for dataset %s", len(companies), dataset_id)
+        # get_or_classify batches internally and skips already-cached companies
+        get_or_classify(db, companies)
+        db.commit()
+        job = db.get(EnrichmentJob, job_id) if job_id else None
+        if job:
+            job.status = JobStatus.COMPLETED
+            job.completed_profiles = len(companies)
+            job.completed_at = utcnow()
+            db.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("company classification crashed for %s", dataset_id)
+    finally:
+        db.close()
+
+
 def backfill_semantics(dataset_id: str, job_id: str | None = None) -> None:
-    """Background task: run the semantic pass for READY people that were deferred
-    during a rate-limited run. Re-embeds so the new keywords land in search."""
+    """Background task: run/refresh the semantic pass for READY people that were
+    deferred during a rate-limited run OR predate a semantic_profile_version
+    bump (spec §37 — no Apify re-scrape). Re-embeds afterwards."""
     db = SessionLocal()
     try:
         from app.services.semantic_enrich import enrich_person_semantics
 
         ctx = _RunContext()
-        people = repo.people_missing_semantics(db, dataset_id)
+        people = repo.people_missing_semantics(
+            db, dataset_id, current_version=settings.semantic_profile_version
+        )
         log.info("semantic backfill: %d profiles for dataset %s", len(people), dataset_id)
         done = 0
         for p in people:
