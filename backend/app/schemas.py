@@ -247,6 +247,26 @@ class ProfileSemanticData(BaseModel):
             return None
 
 
+# ─────────────────── validated LLM output: company classification ───────────────────
+
+
+class CompanyClassificationItem(BaseModel):
+    key: str  # echoes the request key so we can match batched responses back up
+    industries: list[str] = []
+    categories: list[str] = []
+    is_technology_company: bool | None = None
+    is_startup: bool | None = None
+    is_big_tech: bool | None = None
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    reason: str = ""
+
+    _norm = field_validator("industries", "categories", mode="before")(staticmethod(_coerce_str_list))
+
+
+class CompanyClassificationBatch(BaseModel):
+    companies: list[CompanyClassificationItem] = []
+
+
 # ─────────────────── validated LLM output: query ───────────────────
 
 

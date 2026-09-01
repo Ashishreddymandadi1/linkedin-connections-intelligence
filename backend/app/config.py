@@ -79,6 +79,19 @@ class Settings(BaseSettings):
     recency_weighting_enabled: bool = True
     company_id_matching: bool = True
 
+    # ── Search quality v3 — semantic concepts ────────────────
+    #: below this many connections, score EVERYONE — no SQL prefilter at all
+    #: (spec §10/§31: correctness over shaving milliseconds on a ~1k network).
+    full_scan_max_connections: int = 5000
+    company_classification_enabled: bool = True
+    #: candidates in this confidence band get a batched LLM semantic judge call
+    #: for their semantic_concept/company_category criteria (spec §16-18).
+    semantic_judge_enabled: bool = True
+    semantic_judge_pool: int = 60           # max candidates considered for judging per search
+    semantic_judge_batch_size: int = 10
+    semantic_judge_low: float = 0.15        # below this concept strength: skip judging, already a clear miss
+    semantic_judge_high: float = 0.75       # above this: skip judging, already a clear hit
+
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     log_level: str = "INFO"
