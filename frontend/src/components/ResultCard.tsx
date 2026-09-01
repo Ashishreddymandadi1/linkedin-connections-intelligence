@@ -1,8 +1,22 @@
 import { useState } from "react";
 import { ChevronDown, ExternalLink } from "lucide-react";
 import type { SearchResultItem } from "../api/types";
+import { evidenceProvenance } from "../api/types";
 import { initials } from "../lib/format";
 import { Badge, ScoreMeter } from "./ui";
+
+const PROVENANCE_LABEL: Record<string, string> = {
+  linkedin: "LinkedIn data",
+  ai_inferred: "AI inferred",
+  company_inference: "Company inference",
+  relevance: "Semantic relevance",
+};
+const PROVENANCE_TONE: Record<string, "fact" | "inferred"> = {
+  linkedin: "fact",
+  ai_inferred: "inferred",
+  company_inference: "inferred",
+  relevance: "inferred",
+};
 
 export function ResultCard({ item }: { item: SearchResultItem }) {
   const [open, setOpen] = useState(false);
@@ -82,17 +96,24 @@ export function ResultCard({ item }: { item: SearchResultItem }) {
             <div>
               <div className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Evidence</div>
               <ul className="mt-1 space-y-1">
-                {item.evidence.map((e, i) => (
-                  <li key={i} className="flex gap-2">
-                    <span className="text-ink-faint">•</span>
-                    <span>
-                      {e.text}{" "}
-                      <Badge tone={e.type === "semantic" ? "inferred" : "fact"}>
-                        {e.type === "semantic" ? "AI inferred" : "LinkedIn data"}
-                      </Badge>
-                    </span>
-                  </li>
-                ))}
+                {item.evidence.map((e, i) => {
+                  const prov = evidenceProvenance(e.type);
+                  const conf = e.detail?.confidence as number | undefined;
+                  return (
+                    <li key={i} className="flex gap-2">
+                      <span className="text-ink-faint">•</span>
+                      <span>
+                        {e.text}{" "}
+                        <Badge tone={PROVENANCE_TONE[prov]}>
+                          {PROVENANCE_LABEL[prov]}
+                          {prov !== "linkedin" && typeof conf === "number"
+                            ? ` · ${Math.round(conf * 100)}%`
+                            : ""}
+                        </Badge>
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}

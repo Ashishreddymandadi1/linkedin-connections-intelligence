@@ -53,10 +53,27 @@ export interface PersonListItem {
   enrichment_state: string;
 }
 
+/**
+ * type distinguishes provenance (spec §19, §38):
+ *  experience | education | skill | certification | language | publication | location
+ *      -> verified LinkedIn data
+ *  semantic          -> AI inferred from the profile
+ *  company_inference -> AI classification of the employer
+ *  semantic_relevance-> whole-profile / cross-encoder similarity signal
+ */
 export interface EvidenceItem {
   type: string;
   text: string;
   detail: Record<string, unknown>;
+}
+
+export type EvidenceProvenance = "linkedin" | "ai_inferred" | "company_inference" | "relevance";
+
+export function evidenceProvenance(type: string): EvidenceProvenance {
+  if (type === "company_inference") return "company_inference";
+  if (type === "semantic_relevance" || type === "relevance") return "relevance";
+  if (type === "semantic") return "ai_inferred";
+  return "linkedin";
 }
 
 export interface ScoreComponent {
@@ -128,6 +145,10 @@ export interface SearchResponse {
       id: string;
       type: string;
       value: string;
+      values?: string[];
+      operator?: "ANY_OF" | "ALL_OF" | "NOT";
+      scope?: string | null;
+      concept?: string | null;
       weight: number;
       required: boolean;
     }>;

@@ -56,7 +56,8 @@ export default function DashboardPage() {
 
       {s && s.ready > 0 && (
         <p className="mt-2 text-xs text-ink-faint">
-          Excel includes {s.ready + s.partial} enriched profiles across 4 sheets (Profiles, Experiences, Education, Skills).
+          Excel includes {s.ready + s.partial} enriched profiles across 7 sheets (Profiles, Experiences,
+          Education, Skills, Certifications, Languages, Publications).
         </p>
       )}
 

@@ -32,12 +32,20 @@ export default function ResultsPage() {
 
           {res.interpreted_query?.criteria?.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {res.interpreted_query.criteria.map((c) => (
-                <Badge key={c.id} tone={c.required ? "accent" : "default"}>
-                  {c.value} · {c.weight.toFixed(0)}
-                  {c.required ? " · required" : ""}
-                </Badge>
-              ))}
+              {res.interpreted_query.criteria.map((c) => {
+                const label =
+                  c.concept ||
+                  (c.values && c.values.length > 1
+                    ? c.values.join(c.operator === "ALL_OF" ? " AND " : " or ")
+                    : c.value);
+                return (
+                  <Badge key={c.id} tone={c.required ? "accent" : "default"}>
+                    {c.operator === "NOT" ? "NOT " : ""}
+                    {label} · {c.weight.toFixed(0)}
+                    {c.required ? " · required" : ""}
+                  </Badge>
+                );
+              })}
             </div>
           )}
 

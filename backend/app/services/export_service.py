@@ -6,6 +6,7 @@ Only enriched people (READY / PARTIAL / WAITING_FOR_FREE_LLM) are included.
 from __future__ import annotations
 
 import io
+import re
 from datetime import datetime
 
 from openpyxl import Workbook
@@ -16,6 +17,24 @@ from sqlalchemy.orm import Session
 from app import repositories as repo
 from app.constants import EnrichmentState
 from app.models import Dataset
+
+#: XML 1.0 forbids these control chars in a worksheet cell (openpyxl raises
+#: IllegalCharacterError). Keeps normal unicode, newlines, tabs, bullets,
+#: em-dashes, accents — strips only the truly illegal range (spec §32).
+_ILLEGAL_XLSX_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize_excel_value(value):
+    """Make any value safe to write into an openpyxl cell."""
+    if isinstance(value, str):
+        return _ILLEGAL_XLSX_RE.sub("", value)
+    return value
+
+
+def _append(ws, row: list) -> None:
+    """Every row goes through here — sanitize each cell (spec §32: apply to
+    EVERY value, not just experience.description)."""
+    ws.append([sanitize_excel_value(v) for v in row])
 
 _INCLUDED = {
     EnrichmentState.READY,
@@ -121,7 +140,7 @@ def build_workbook(db: Session, dataset: Dataset) -> bytes:
             ", ",
         )
 
-        prof.append(
+        _append(prof, 
             [
                 p.full_name, p.first_name, p.last_name, p.linkedin_url, p.public_identifier,
                 p.headline, p.current_title, p.current_company, p.location_text,
@@ -144,7 +163,7 @@ def build_workbook(db: Session, dataset: Dataset) -> bytes:
         )
 
         for e in exps:
-            exp_ws.append([
+            _append(exp_ws, [
                 p.full_name, p.linkedin_url, e.position, e.company_name, e.company_linkedin_url,
                 e.employment_type, e.location,
                 _period(e.start_month, e.start_year, e.start_text),
@@ -152,18 +171,18 @@ def build_workbook(db: Session, dataset: Dataset) -> bytes:
                 _yn(e.is_current), e.duration_text, e.description,
             ])
         for e in edus:
-            edu_ws.append([p.full_name, p.linkedin_url, e.school_name, e.degree, e.field_of_study, e.start_year, e.end_year])
+            _append(edu_ws, [p.full_name, p.linkedin_url, e.school_name, e.degree, e.field_of_study, e.start_year, e.end_year])
         for sk in skills:
-            skill_ws.append([
+            _append(skill_ws, [
                 p.full_name, p.linkedin_url, sk.skill_name, sk.source,
                 _yn(sk.is_inferred), round(sk.confidence, 2), sk.evidence,
             ])
         for c in repo.get_certifications(db, p.id):
-            cert_ws.append([p.full_name, p.linkedin_url, c.name, c.issuer, c.issued_at, c.url])
+            _append(cert_ws, [p.full_name, p.linkedin_url, c.name, c.issuer, c.issued_at, c.url])
         for lang in repo.get_languages(db, p.id):
-            lang_ws.append([p.full_name, p.linkedin_url, lang.name, lang.proficiency])
+            _append(lang_ws, [p.full_name, p.linkedin_url, lang.name, lang.proficiency])
         for pub in repo.get_publications(db, p.id):
-            pub_ws.append([p.full_name, p.linkedin_url, pub.title, pub.publisher, pub.published_at, pub.url])
+            _append(pub_ws, [p.full_name, p.linkedin_url, pub.title, pub.publisher, pub.published_at, pub.url])
 
     for ws in wb.worksheets:
         _autosize(ws)
