@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from collections import Counter
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.constants import EnrichmentState
 from app.models import (
     Certification,
+    CompanySemantic,
     Connection,
     Dataset,
     Education,
@@ -129,18 +130,22 @@ def people_needing_enrichment(db: Session, dataset_id: str, *, defer_waiting: bo
 _TERMINAL = {EnrichmentState.READY, EnrichmentState.PARTIAL, EnrichmentState.FAILED}
 
 
-def people_missing_semantics(db: Session, dataset_id: str) -> list[Person]:
-    """READY/PARTIAL people whose semantic pass never completed (deferred during a
-    rate-limited run) — picked up by a resume / backfill."""
-    return list(
-        db.scalars(
-            select(Person)
-            .where(Person.dataset_id == dataset_id)
-            .where(Person.enrichment_state.in_([EnrichmentState.READY, EnrichmentState.PARTIAL]))
-            .where(Person.semantic_version.is_(None))
-            .order_by(Person.created_at)
-        )
+def people_missing_semantics(db: Session, dataset_id: str, *, current_version: int | None = None) -> list[Person]:
+    """READY/PARTIAL people whose semantic pass never completed, OR (when
+    ``current_version`` is given) whose semantics predate a version bump —
+    picked up by a resume / backfill. No Apify re-scrape needed either way."""
+    stmt = (
+        select(Person)
+        .where(Person.dataset_id == dataset_id)
+        .where(Person.enrichment_state.in_([EnrichmentState.READY, EnrichmentState.PARTIAL]))
     )
+    if current_version is None:
+        stmt = stmt.where(Person.semantic_version.is_(None))
+    else:
+        stmt = stmt.where(
+            or_(Person.semantic_version.is_(None), Person.semantic_version < current_version)
+        )
+    return list(db.scalars(stmt.order_by(Person.created_at)))
 
 
 def enrichment_state_counts(db: Session, dataset_id: str) -> dict[str, int]:
@@ -368,3 +373,99 @@ def get_search_results(db: Session, search_id: str) -> list[SearchResult]:
             select(SearchResult).where(SearchResult.search_id == search_id).order_by(SearchResult.rank)
         )
     )
+
+
+# ─────────────────── company intelligence (spec §4) ───────────────────
+
+
+def get_company_semantics(db: Session, keys: list[str]) -> dict[str, CompanySemantic]:
+    """Bulk lookup by ``company_key`` (see company_intel.company_key)."""
+    if not keys:
+        return {}
+    rows = db.scalars(select(CompanySemantic).where(CompanySemantic.company_key.in_(keys)))
+    return {r.company_key: r for r in rows}
+
+
+def upsert_company_semantic(db: Session, company_key: str, **fields) -> CompanySemantic:
+    existing = db.scalars(
+        select(CompanySemantic).where(CompanySemantic.company_key == company_key)
+    ).first()
+    if existing:
+        for k, v in fields.items():
+            setattr(existing, k, v)
+        db.flush()
+        return existing
+    row = CompanySemantic(company_key=company_key, **fields)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def distinct_companies(db: Session, dataset_id: str) -> list[tuple[str | None, str, str | None]]:
+    """``[(company_id, company_name, company_linkedin_url)]`` for every distinct
+    employer appearing in this dataset's experiences (for classification backfill)."""
+    rows = db.execute(
+        select(Experience.company_id, Experience.company_name, Experience.company_linkedin_url)
+        .join(Person, Person.id == Experience.person_id)
+        .where(Person.dataset_id == dataset_id)
+        .where(Experience.company_name.is_not(None))
+        .distinct()
+    ).all()
+    return list(rows)
+
+
+# ─────────────────── bulk fact loading (avoids N+1 over a candidate pool) ───────────────────
+
+
+def bulk_experiences(db: Session, person_ids: list[str]) -> dict[str, list[Experience]]:
+    return _bulk_by_person(db, Experience, person_ids, order_col=Experience.order_index)
+
+
+def bulk_education(db: Session, person_ids: list[str]) -> dict[str, list[Education]]:
+    return _bulk_by_person(db, Education, person_ids, order_col=Education.order_index)
+
+
+def bulk_skills(db: Session, person_ids: list[str]) -> dict[str, list[Skill]]:
+    return _bulk_by_person(db, Skill, person_ids)
+
+
+def bulk_certifications(db: Session, person_ids: list[str]) -> dict[str, list[Certification]]:
+    return _bulk_by_person(db, Certification, person_ids, order_col=Certification.order_index)
+
+
+def bulk_languages(db: Session, person_ids: list[str]) -> dict[str, list[Language]]:
+    return _bulk_by_person(db, Language, person_ids, order_col=Language.order_index)
+
+
+def bulk_publications(db: Session, person_ids: list[str]) -> dict[str, list[Publication]]:
+    return _bulk_by_person(db, Publication, person_ids, order_col=Publication.order_index)
+
+
+def bulk_semantics(db: Session, person_ids: list[str]) -> dict[str, ProfileSemantic]:
+    if not person_ids:
+        return {}
+    rows = db.scalars(select(ProfileSemantic).where(ProfileSemantic.person_id.in_(person_ids)))
+    return {r.person_id: r for r in rows}
+
+
+def bulk_embeddings_by_person(db: Session, person_ids: list[str]) -> dict[str, bytes]:
+    if not person_ids:
+        return {}
+    rows = db.execute(
+        select(ProfileEmbedding.person_id, ProfileEmbedding.vector).where(
+            ProfileEmbedding.person_id.in_(person_ids)
+        )
+    ).all()
+    return {pid: vec for pid, vec in rows}
+
+
+def _bulk_by_person(db: Session, model, person_ids: list[str], *, order_col=None) -> dict[str, list]:
+    if not person_ids:
+        return {}
+    stmt = select(model).where(model.person_id.in_(person_ids))
+    if order_col is not None:
+        stmt = stmt.order_by(model.person_id, order_col)
+    out: dict[str, list] = {pid: [] for pid in person_ids}
+    for row in db.scalars(stmt):
+        out.setdefault(row.person_id, []).append(row)
+    return out

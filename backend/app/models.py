@@ -280,6 +280,40 @@ class Recommendation(Base):
     order_index: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class CompanySemantic(Base):
+    """Company-level classification, cached once and reused across every person
+    who worked there (spec §4). Keyed by LinkedIn ``company_id`` when known,
+    else a normalized company name. Never re-classified per-person.
+
+    ``is_startup`` / ``is_big_tech`` / ``is_technology_company`` are tri-state:
+    ``True``/``False`` only when the classifier is confident; ``None`` (=
+    UNKNOWN) when evidence is insufficient — UNKNOWN is never treated as False.
+    """
+
+    __tablename__ = "company_semantics"
+    __table_args__ = (UniqueConstraint("company_key", name="uq_company_semantics_key"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("cosem"))
+    #: "id:<linkedin company_id>" or "name:<normalized name>" — see company_intel.py
+    company_key: Mapped[str] = mapped_column(String, index=True)
+    company_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    industries: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    categories: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    is_technology_company: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_startup: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_big_tech: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provenance: Mapped[str] = mapped_column(String, default="unknown")
+    llm_provider: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class ProfileSemantic(Base):
     """LLM-derived interpretation of one profile (spec §26). Cached by version."""
 

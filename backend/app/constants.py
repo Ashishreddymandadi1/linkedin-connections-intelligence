@@ -64,7 +64,7 @@ class RawSource:
 
 
 class CriterionType:
-    """Types the query interpreter may emit (spec §30)."""
+    """Types the query interpreter may emit (spec §30, extended v3)."""
 
     CURRENT_COMPANY = "current_company"
     PAST_COMPANY = "past_company"
@@ -78,11 +78,72 @@ class CriterionType:
     CERTIFICATION = "certification"
     LANGUAGE = "language"
     PUBLICATION = "publication"
+    #: a professional concept that is NOT a literal string to search for —
+    #: industry experience, role/function, leadership, mentorship, etc.
+    #: Evaluated via semantic_assertions -> company classification -> semantic
+    #: fields -> cross-encoder -> LLM judge (never phrase_matches alone).
+    SEMANTIC_CONCEPT = "semantic_concept"
+    #: a company-level classification (startup / big_tech / fintech / consulting
+    #: / healthcare_tech / …) evaluated against the person's ACTUAL employer(s)
+    #: via CompanySemantic, not against literal text in their profile.
+    COMPANY_CATEGORY = "company_category"
 
 
 ALL_CRITERION_TYPES = {
     v for k, v in vars(CriterionType).items() if not k.startswith("_") and isinstance(v, str)
 }
+
+#: criterion types that must be evaluated as semantic concepts, never phrase_matches
+SEMANTIC_CRITERION_TYPES = {CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY}
+
+
+class Operator:
+    """How a criterion's ``values`` combine (spec §13)."""
+
+    ANY_OF = "ANY_OF"
+    ALL_OF = "ALL_OF"
+    NOT = "NOT"
+
+
+ALL_OPERATORS = {Operator.ANY_OF, Operator.ALL_OF, Operator.NOT}
+
+
+class Scope:
+    """Which part of a career a criterion applies to (spec §1)."""
+
+    CURRENT = "current"
+    PAST = "past"
+    ANY_EXPERIENCE = "any_experience"
+    CAREER = "career"
+    CURRENT_COMPANY = "current_company"
+    PAST_COMPANY = "past_company"
+
+
+ALL_SCOPES = {v for k, v in vars(Scope).items() if not k.startswith("_") and isinstance(v, str)}
+
+
+class TriState:
+    """Three-valued fact status — missing data is UNKNOWN, never FALSE (spec §15)."""
+
+    TRUE = "true"
+    FALSE = "false"
+    UNKNOWN = "unknown"
+
+
+class AssertionCategory:
+    """``semantic_assertions[].category`` on ProfileSemanticData (spec §7)."""
+
+    INDUSTRY_EXPERIENCE = "industry_experience"
+    ROLE_FUNCTION = "role_function"
+    LEADERSHIP = "leadership"
+    MENTORSHIP = "mentorship"
+    COMPANY_CATEGORY = "company_category"
+    DOMAIN_EXPERTISE = "domain_expertise"
+
+
+class CompanyClassProvenance:
+    LLM_INFERENCE = "ai_company_inference"
+    UNKNOWN = "unknown"
 
 
 class LLMProviderName:

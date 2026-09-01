@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.constants import ALL_CRITERION_TYPES
+from app.constants import ALL_CRITERION_TYPES, ALL_OPERATORS, ALL_SCOPES, Operator
 
 # ─────────────────────────── datasets ───────────────────────────
 
@@ -150,6 +150,29 @@ def _coerce_str_list(v):
     return [x for x in out if x]
 
 
+class SemanticAssertion(BaseModel):
+    """One derived professional-concept assertion (spec §7). Provenance-tagged,
+    never presented as a verified LinkedIn fact."""
+
+    concept: str
+    category: str = "industry_experience"
+    scope: str = "career"
+    confidence: float = Field(ge=0.0, le=1.0, default=0.6)
+    evidence: list[str] = []
+
+    @field_validator("concept")
+    @classmethod
+    def _nonempty_concept(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("concept must be non-empty")
+        return v.strip()
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _coerce_evidence(cls, v):
+        return _coerce_str_list(v)
+
+
 class ProfileSemanticData(BaseModel):
     seniority_level: str | None = None
     job_families: list[str] = []
@@ -167,6 +190,10 @@ class ProfileSemanticData(BaseModel):
     education_keywords: list[str] = []
     role_keywords: list[str] = []
     searchable_keywords: list[str] = []
+    #: derived professional-concept assertions (spec §7) — NOT verified LinkedIn
+    #: facts. Each keeps its own evidence + confidence so provenance survives
+    #: into search results.
+    semantic_assertions: list["SemanticAssertion"] = []
 
     _norm_lists = field_validator(
         "job_families",
@@ -196,6 +223,19 @@ class ProfileSemanticData(BaseModel):
                 out.append({"skill": item, "confidence": 0.5, "evidence": ""})
         return out
 
+    @field_validator("semantic_assertions", mode="before")
+    @classmethod
+    def _coerce_assertions(cls, v):
+        if not v:
+            return []
+        out = []
+        for item in v if isinstance(v, list) else [v]:
+            if isinstance(item, dict) and item.get("concept"):
+                out.append(item)
+            elif isinstance(item, str) and item.strip():
+                out.append({"concept": item.strip(), "evidence": []})
+        return out
+
     @field_validator("years_of_experience", mode="before")
     @classmethod
     def _sane_yoe(cls, v) -> float | None:
@@ -213,18 +253,62 @@ class ProfileSemanticData(BaseModel):
 class SearchCriterion(BaseModel):
     id: str
     type: str
-    value: str
     weight: float = Field(ge=0)
     required: bool = False
+
+    # backward-compatible single value (every existing scorer reads .value)
+    value: str = ""
+    # v3 additions — optional, all existing code that only reads .value/.type
+    # keeps working unchanged.
+    values: list[str] = []
+    operator: str = Operator.ANY_OF
+    scope: str | None = None
+    #: free-text semantic concept description — required for semantic_concept /
+    #: company_category, ignored for exact-fact types.
+    concept: str | None = None
 
     @field_validator("type")
     @classmethod
     def _known_type(cls, v: str) -> str:
-        v = v.strip().lower()
+        v = v.strip().lower().replace(" ", "_")
         if v not in ALL_CRITERION_TYPES:
-            # tolerate unknown types by folding to keyword rather than erroring
+            # tolerate unknown types by folding to keyword rather than silently
+            # inventing behavior — but semantic-sounding unknowns fold to
+            # semantic_concept instead of a literal keyword search (spec §3/§25).
+            if any(h in v for h in ("industry", "sector", "category", "concept", "startup", "leader", "mentor")):
+                return "semantic_concept"
             return "keyword"
         return v
+
+    @field_validator("operator")
+    @classmethod
+    def _known_operator(cls, v: str) -> str:
+        v = (v or Operator.ANY_OF).strip().upper()
+        return v if v in ALL_OPERATORS else Operator.ANY_OF
+
+    @field_validator("scope")
+    @classmethod
+    def _known_scope(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        v = v.strip().lower()
+        return v if v in ALL_SCOPES else None
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def _coerce_values(cls, v):
+        return _coerce_str_list(v)
+
+    @model_validator(mode="after")
+    def _sync_value_and_values(self) -> "SearchCriterion":
+        if not self.values and self.value:
+            self.values = [self.value]
+        if not self.value and self.values:
+            self.value = self.values[0]
+        if not self.value and not self.values and self.concept:
+            self.value = self.concept
+            self.values = [self.concept]
+        return self
 
 
 class ParsedSearchQuery(BaseModel):
