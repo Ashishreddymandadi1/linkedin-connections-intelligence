@@ -1,8 +1,24 @@
-"""Deterministic, evidence-backed match scoring (spec §35–§37).
+"""Deterministic + semantic evidence-backed match scoring (spec §14–§20, §27–§28).
 
-No LLM decides a score. For every criterion we compute ``match_strength ∈ [0,1]``
-in code, multiply by the criterion weight, and attach a structured evidence list
-pointing at real rows. ``match_score = min(100, Σ criterion_score)``.
+Hybrid (spec: "Use deterministic matching for facts. Use semantic reasoning for
+concepts."):
+
+* EXACT FACTS (company / school / location / certification / language / title /
+  skill) — computed in code against normalized rows. ``match_strength ∈ [0,1]``,
+  attached evidence points at a real row. A ``required`` fact that isn't found is
+  a hard exclude (we have the person's complete LinkedIn experience list, so
+  "not found" is a real negative).
+
+* SEMANTIC CONCEPTS (semantic_concept / company_category) — evaluated strongest→
+  weakest: profile semantic assertion → company classification against a real
+  experience row → semantic fields (industries / job_families / …) → concept-vs-
+  career cross-encoder. Returns a TRUE / FALSE / UNKNOWN status. A ``required``
+  semantic concept excludes ONLY on a confident FALSE — never on UNKNOWN
+  (spec §15/§28: missing data ≠ verified absence).
+
+No LLM decides a numeric score here. (An optional batched LLM *judge* runs
+upstream in search_service for ambiguous semantic concepts and feeds its
+verdict back in via ``ScoringContext.judge_results``.)
 """
 from __future__ import annotations
 
@@ -12,14 +28,17 @@ from sqlalchemy.orm import Session
 
 from app import repositories as repo
 from app.config import settings
-from app.constants import CriterionType, SkillSource
+from app.constants import CriterionType, Operator, Scope, SkillSource, TriState
 from app.models import Person
 from app.schemas import EvidenceItem, ParsedSearchQuery, ScoreComponent, SearchCriterion
+from app.services.company_intel import company_key
+from app.services.geo import expand_values, location_matches
 from app.services.matching import (
     company_matches,
+    concept_overlap,
     experience_weight,
+    is_cxo_title,
     norm,
-    norm_company,
     phrase_matches,
     seniority_rank,
     token_overlap,
@@ -27,6 +46,7 @@ from app.services.matching import (
 
 _REQUIRED_MIN = 0.15
 _MATCHED_MIN = 0.2
+_SEMANTIC_TYPES = {CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY}
 
 
 @dataclass
@@ -34,10 +54,12 @@ class ScoringContext:
     """Per-search signals shared across candidates."""
 
     query_embedding: bytes | None = None
-    #: person_id -> cross-encoder relevance in [0,1] (filled for the rerank pool)
     reranker_scores: dict[str, float] = field(default_factory=dict)
-    #: criterion_id -> resolved company_ids for company criteria
     company_ids_by_criterion: dict[str, set[str]] = field(default_factory=dict)
+    #: company_key -> classification dict (from company_intel.get_or_classify)
+    company_class: dict[str, dict] = field(default_factory=dict)
+    #: person_id -> {criterion_id: {"status","match_strength","confidence","reason","evidence"}}
+    judge_results: dict[str, dict[str, dict]] = field(default_factory=dict)
 
 
 @dataclass
@@ -67,36 +89,56 @@ class ScoredCandidate:
     excluded_reason: str | None = None
 
 
-def load_facts(db: Session, person: Person) -> ProfileFacts:
-    sem = repo.get_semantic(db, person.id)
-    emb = None
-    from app.models import ProfileEmbedding  # local import to avoid cycle at module load
+def load_facts(db: Session, person: Person, facts_cache: dict | None = None) -> ProfileFacts:
+    """Build a ProfileFacts. ``facts_cache`` (from repositories.bulk_*) avoids
+    the per-candidate N+1 (spec §31) — pass ``{"experiences": {...}, ...}``."""
+    fc = facts_cache or {}
+    pid = person.id
 
-    row = db.query(ProfileEmbedding).filter(ProfileEmbedding.person_id == person.id).first()
-    if row:
-        emb = row.vector
+    if fc:
+        sem_row = fc.get("semantics", {}).get(pid)
+        return ProfileFacts(
+            person=person,
+            experiences=fc.get("experiences", {}).get(pid, []),
+            education=fc.get("education", {}).get(pid, []),
+            skills=fc.get("skills", {}).get(pid, []),
+            semantic=(sem_row.data if sem_row and sem_row.data else {}),
+            embedding=fc.get("embeddings", {}).get(pid),
+            certifications=fc.get("certifications", {}).get(pid, []),
+            languages=fc.get("languages", {}).get(pid, []),
+            publications=fc.get("publications", {}).get(pid, []),
+        )
+
+    sem = repo.get_semantic(db, pid)
+    from app.models import ProfileEmbedding
+
+    row = db.query(ProfileEmbedding).filter(ProfileEmbedding.person_id == pid).first()
     return ProfileFacts(
         person=person,
-        experiences=repo.get_experiences(db, person.id),
-        education=repo.get_education(db, person.id),
-        skills=repo.get_skills(db, person.id),
+        experiences=repo.get_experiences(db, pid),
+        education=repo.get_education(db, pid),
+        skills=repo.get_skills(db, pid),
         semantic=(sem.data if sem and sem.data else {}),
-        embedding=emb,
-        certifications=repo.get_certifications(db, person.id),
-        languages=repo.get_languages(db, person.id),
-        publications=repo.get_publications(db, person.id),
+        embedding=row.vector if row else None,
+        certifications=repo.get_certifications(db, pid),
+        languages=repo.get_languages(db, pid),
+        publications=repo.get_publications(db, pid),
     )
 
 
-# ─────────────────────── per-criterion strategies ───────────────────────
+# ─────────────────────── exact-fact strategies ───────────────────────
+
+
+def _experiences_in_scope(experiences: list, scope: str | None) -> list:
+    if scope in (Scope.CURRENT, Scope.CURRENT_COMPANY):
+        return [e for e in experiences if e.is_current]
+    if scope in (Scope.PAST, Scope.PAST_COMPANY):
+        return [e for e in experiences if not e.is_current]
+    return list(experiences)
 
 
 def _score_company(
-    facts: ProfileFacts,
-    value: str,
-    *,
-    want_current: bool | None,
-    resolved_ids: set[str] | None = None,
+    facts: ProfileFacts, value: str, *, want_current: bool | None, resolved_ids: set[str] | None = None
 ) -> tuple[float, list[EvidenceItem]]:
     best = 0.0
     ev: list[EvidenceItem] = []
@@ -111,12 +153,8 @@ def _score_company(
             + (f" ({e.start_year}–{e.end_year or 'present'})" if e.start_year else "")
             + (" — verified company" if by_id else ""),
             detail={
-                "company": e.company_name,
-                "title": e.position,
-                "start_year": e.start_year,
-                "end_year": e.end_year,
-                "is_current": e.is_current,
-                "verified": by_id,
+                "company": e.company_name, "title": e.position, "start_year": e.start_year,
+                "end_year": e.end_year, "is_current": e.is_current, "verified": by_id,
             },
         )
         if want_current is True:
@@ -127,23 +165,16 @@ def _score_company(
             base = 1.0
         strength = base * experience_weight(e, enabled=recency_on)
         if strength > best:
-            best = strength
-            ev = [item]
+            best, ev = strength, [item]
     return best, ev
 
 
 def _score_skill(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
     target = norm(value)
-    # 1. explicit LinkedIn skill
     for s in facts.skills:
         if s.skill_name_norm == target or phrase_matches(s.skill_name_norm, target):
-            if not s.is_inferred and s.source in (
-                SkillSource.PROFILE,
-                SkillSource.EXPERIENCE,
-                SkillSource.EDUCATION,
-            ):
+            if not s.is_inferred and s.source in (SkillSource.PROFILE, SkillSource.EXPERIENCE, SkillSource.EDUCATION):
                 return 1.0, [EvidenceItem(type="skill", text=f"{s.skill_name} — listed on LinkedIn", detail={"source": s.source})]
-    # 2. semantic explicit / inferred
     sem = facts.semantic
     for sk in sem.get("explicit_skills", []):
         if phrase_matches(sk, value):
@@ -153,20 +184,13 @@ def _score_skill(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceI
         if name and phrase_matches(name, value):
             conf = float(isk.get("confidence", 0.7))
             return min(0.9, 0.5 + conf * 0.4), [
-                EvidenceItem(
-                    type="semantic",
-                    text=f"{name} — inferred: {isk.get('evidence', '')[:160]}",
-                    detail={"confidence": conf, "inferred": True},
-                )
+                EvidenceItem(type="semantic", text=f"{name} — inferred: {isk.get('evidence', '')[:160]}", detail={"confidence": conf, "inferred": True})
             ]
-    # 3. mentioned in experience descriptions / listed experience skills
     for e in facts.experiences:
         exp_skill_text = " ".join(e.skills_json) if e.skills_json else ""
         if phrase_matches(e.description, value) or phrase_matches(exp_skill_text, value):
             w = experience_weight(e, enabled=settings.recency_weighting_enabled)
-            return round(0.6 * w, 3), [
-                EvidenceItem(type="experience", text=f"referenced in the {e.company_name or 'role'} description", detail={})
-            ]
+            return round(0.6 * w, 3), [EvidenceItem(type="experience", text=f"referenced in the {e.company_name or 'role'} description", detail={})]
     for dom in sem.get("technical_domains", []) + sem.get("domain_expertise", []):
         if phrase_matches(dom, value):
             return 0.6, [EvidenceItem(type="semantic", text=f"domain: {dom}", detail={"inferred": True})]
@@ -177,17 +201,11 @@ def _score_skill(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceI
 
 
 def _score_domain(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
-    sem = facts.semantic
-    for dom in sem.get("technical_domains", []) + sem.get("domain_expertise", []) + sem.get("job_families", []):
-        if phrase_matches(dom, value):
-            return 0.9, [EvidenceItem(type="semantic", text=f"domain expertise: {dom}", detail={"inferred": True})]
-    for e in facts.experiences:
-        if phrase_matches(e.description, value):
-            return 0.75, [EvidenceItem(type="experience", text=f"{e.company_name or 'a role'}: {(e.description or '')[:160]}", detail={})]
-    hay = " ".join(filter(None, [facts.person.headline, facts.person.about, *(sem.get("searchable_keywords") or [])]))
-    if phrase_matches(hay, value):
-        return 0.6, [EvidenceItem(type="headline", text="referenced in profile text", detail={})]
-    # fall back to skill logic
+    # legacy type — route to the concept evaluator so it uses the full semantic
+    # profile instead of phrase_matches (spec §6)
+    strength, ev, _status = _score_semantic_concept(facts, _synthetic_crit(value), ScoringContext())
+    if strength > 0:
+        return strength, ev
     return _score_skill(facts, value)
 
 
@@ -196,8 +214,7 @@ def _title_strength(title: str | None, value: str) -> float:
         return 0.0
     if phrase_matches(title, value):
         return 1.0
-    ov = token_overlap(title, value)
-    return 0.6 if ov >= 0.34 else 0.0
+    return 0.6 if token_overlap(title, value) >= 0.34 else 0.0
 
 
 def _score_title(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
@@ -205,8 +222,7 @@ def _score_title(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceI
     cur = _title_strength(p.current_title, value)
     if cur > 0:
         return cur, [EvidenceItem(type="experience", text=f"current title: {p.current_title}", detail={"current": True})]
-    best = 0.0
-    ev: list[EvidenceItem] = []
+    best, ev = 0.0, []
     for e in facts.experiences:
         s = _title_strength(e.position, value) * (1.0 if e.is_current else 0.9)
         if s > best:
@@ -232,23 +248,32 @@ def _score_education(facts: ProfileFacts, value: str) -> tuple[float, list[Evide
 
 def _score_location(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
     p = facts.person
-    hay = " ".join(filter(None, [p.location_text, p.city, p.state, p.country]))
-    if phrase_matches(hay, value):
-        return 1.0, [EvidenceItem(type="headline", text=f"located in {p.location_text}", detail={})]
+    fields = [p.location_text, p.city, p.state, p.country]
+    for candidate in expand_values([value]):
+        if location_matches(fields, candidate):
+            return 1.0, [EvidenceItem(type="location", text=f"located in {p.location_text or candidate}", detail={"matched": candidate})]
     return 0.0, []
 
 
 def _score_seniority(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
+    v = norm(value)
+    title = facts.person.current_title
+    # "CXO"/executive — accept any real C-suite title, not a rank-gap game
+    if "cxo" in v or v in {"executive", "c-suite", "c-level", "chief"}:
+        if is_cxo_title(title) or seniority_rank(facts.semantic.get("seniority_level")) == 8:
+            return 1.0, [EvidenceItem(type="experience", text=f"executive title: {title or facts.semantic.get('seniority_level')}", detail={})]
+        rank = seniority_rank(facts.semantic.get("seniority_level")) or seniority_rank(title)
+        return (0.5 if rank == 7 else 0.25 if rank == 6 else 0.0), (
+            [EvidenceItem(type="semantic", text=f"seniority: {facts.semantic.get('seniority_level') or title}", detail={})] if rank and rank >= 6 else []
+        )
     want = seniority_rank(value)
-    have = seniority_rank(facts.semantic.get("seniority_level")) or seniority_rank(facts.person.current_title)
+    have = seniority_rank(facts.semantic.get("seniority_level")) or seniority_rank(title)
     if want is None or have is None:
         return 0.0, []
     gap = abs(want - have)
     strength = 1.0 if gap == 0 else 0.6 if gap == 1 else 0.0
     if strength:
-        return strength, [
-            EvidenceItem(type="semantic", text=f"seniority: {facts.semantic.get('seniority_level') or facts.person.current_title}", detail={})
-        ]
+        return strength, [EvidenceItem(type="semantic", text=f"seniority: {facts.semantic.get('seniority_level') or title}", detail={})]
     return 0.0, []
 
 
@@ -256,14 +281,7 @@ def _score_certification(facts: ProfileFacts, value: str) -> tuple[float, list[E
     for c in facts.certifications:
         hay = " ".join(filter(None, [c.name, c.issuer]))
         if phrase_matches(hay, value) or phrase_matches(value, c.name or ""):
-            return 1.0, [
-                EvidenceItem(
-                    type="certification",
-                    text=f"{c.name}" + (f" — {c.issuer}" if c.issuer else "") + " (certification)",
-                    detail={"issuer": c.issuer, "issued_at": c.issued_at},
-                )
-            ]
-    # a bare cert-provider query ("AWS certification") also matches issuer text
+            return 1.0, [EvidenceItem(type="certification", text=f"{c.name}" + (f" — {c.issuer}" if c.issuer else "") + " (certification)", detail={"issuer": c.issuer, "issued_at": c.issued_at})]
     for c in facts.certifications:
         toks = [t for t in norm(value).split() if t not in {"certification", "certified", "cert", "certificate"}]
         if toks and all(t in norm(f"{c.name} {c.issuer}") for t in toks):
@@ -276,13 +294,7 @@ def _score_language(facts: ProfileFacts, value: str) -> tuple[float, list[Eviden
     wanted -= {"speaks", "speak", "language", "languages", "fluent", "native"}
     for lang in facts.languages:
         if lang.name_norm in wanted or any(w in lang.name_norm for w in wanted):
-            return 1.0, [
-                EvidenceItem(
-                    type="language",
-                    text=f"speaks {lang.name}" + (f" ({lang.proficiency})" if lang.proficiency else ""),
-                    detail={"proficiency": lang.proficiency},
-                )
-            ]
+            return 1.0, [EvidenceItem(type="language", text=f"speaks {lang.name}" + (f" ({lang.proficiency})" if lang.proficiency else ""), detail={"proficiency": lang.proficiency})]
     return 0.0, []
 
 
@@ -303,19 +315,156 @@ def _score_publication(facts: ProfileFacts, value: str) -> tuple[float, list[Evi
 
 def _score_keyword(facts: ProfileFacts, value: str) -> tuple[float, list[EvidenceItem]]:
     parts = [
-        facts.person.headline,
-        facts.person.about,
+        facts.person.headline, facts.person.about,
         " ".join(e.description or "" for e in facts.experiences),
         " ".join(s.skill_name for s in facts.skills),
         " ".join(facts.semantic.get("searchable_keywords", [])),
     ]
-    hay = " ".join(filter(None, parts))
-    if phrase_matches(hay, value):
+    if phrase_matches(" ".join(filter(None, parts)), value):
         return 0.8, [EvidenceItem(type="headline", text=f"profile mentions '{value}'", detail={})]
     return 0.0, []
 
 
-#: company types are handled directly in ``_score_one`` (they need ScoringContext).
+# ─────────────────────── semantic-concept strategies ───────────────────────
+
+
+def _synthetic_crit(concept: str) -> SearchCriterion:
+    return SearchCriterion(id="_syn", type=CriterionType.SEMANTIC_CONCEPT, concept=concept, weight=1)
+
+
+def _career_snippet(facts: ProfileFacts) -> str:
+    bits = [facts.person.headline or ""]
+    for e in facts.experiences[:6]:
+        bits.append(f"{e.position or ''} at {e.company_name or ''}. {(e.description or '')[:200]}")
+    sem = facts.semantic
+    bits.append(" ".join(sem.get("industries", []) + sem.get("job_families", []) + sem.get("domain_expertise", [])))
+    if sem.get("career_summary"):
+        bits.append(sem["career_summary"])
+    return "  ".join(b for b in bits if b.strip())[:1500]
+
+
+_CATEGORY_FIELD = {
+    "startup": "is_startup", "early stage": "is_startup", "early-stage": "is_startup",
+    "big tech": "is_big_tech", "big technology": "is_big_tech", "faang": "is_big_tech",
+    "major technology": "is_big_tech", "large tech": "is_big_tech",
+    "tech": "is_technology_company", "technology": "is_technology_company",
+    "software": "is_technology_company", "tech company": "is_technology_company",
+}
+
+
+def _category_field(concept: str) -> str | None:
+    c = norm(concept)
+    for key, fld in sorted(_CATEGORY_FIELD.items(), key=lambda kv: -len(kv[0])):
+        if key in c:
+            return fld
+    return None
+
+
+def _score_company_category(
+    facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
+) -> tuple[float, list[EvidenceItem], str]:
+    concept = (crit.concept or crit.value or "").strip()
+    field_name = _category_field(concept)
+    scoped = _experiences_in_scope(facts.experiences, crit.scope)
+
+    saw_false = False
+    for e in scoped:
+        row = ctx.company_class.get(
+            company_key(getattr(e, "company_id", None), getattr(e, "company_name", None))
+        )
+        if not row:
+            continue
+        val = row.get(field_name) if field_name else None
+        if val is True:
+            return 1.0, [
+                EvidenceItem(
+                    type="company_inference",
+                    text=f"{e.company_name} classified as {concept}"
+                    + (f" (“{row.get('reason')}”)" if row.get("reason") else ""),
+                    detail={"confidence": row.get("confidence"), "provenance": row.get("provenance"),
+                            "company": e.company_name, "role": e.position},
+                )
+            ], TriState.TRUE
+        if val is False:
+            saw_false = True
+        # loose category / industry text fallback when the concept isn't one of
+        # the mapped booleans (e.g. "consulting firm", "healthcare tech")
+        if field_name is None:
+            for x in (row.get("industries") or []) + (row.get("categories") or []):
+                if concept_overlap(x, concept) >= 0.5:
+                    return 0.85, [
+                        EvidenceItem(type="company_inference", text=f"{e.company_name} is in {x}",
+                                     detail={"confidence": row.get("confidence"), "provenance": row.get("provenance")})
+                    ], TriState.TRUE
+
+    if saw_false:
+        return 0.0, [
+            EvidenceItem(type="company_inference", text=f"employer(s) in scope are not classified as {concept}", detail={})
+        ], TriState.FALSE
+    return 0.0, [], TriState.UNKNOWN  # not classified yet / ambiguous — NOT a verified false
+
+
+def _score_semantic_concept(
+    facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
+) -> tuple[float, list[EvidenceItem], str]:
+    concept = (crit.concept or crit.value or "").strip()
+    if not concept:
+        return 0.0, [], TriState.UNKNOWN
+    sem = facts.semantic
+
+    # 1. a matching semantic assertion (strongest — LLM-derived + evidence)
+    best_strength, best_ev, best_status = 0.0, [], TriState.UNKNOWN
+    for a in sem.get("semantic_assertions", []):
+        if not isinstance(a, dict):
+            continue
+        ov = concept_overlap(a.get("concept", ""), concept)
+        if ov >= 0.5:
+            conf = float(a.get("confidence", 0.6))
+            strength = min(0.95, 0.5 + conf * 0.45) * (0.6 + 0.4 * ov)
+            ev = [EvidenceItem(
+                type="semantic",
+                text=f"{a.get('concept')} — {'; '.join(a.get('evidence', [])[:2])}",
+                detail={"confidence": conf, "category": a.get("category"), "inferred": True},
+            )]
+            if strength > best_strength:
+                best_strength, best_ev, best_status = strength, ev, TriState.TRUE
+
+    # 2. semantic fields
+    if best_strength < 0.8:
+        for fld, label in (("industries", "industry"), ("job_families", "role"),
+                           ("domain_expertise", "domain expertise"), ("leadership_experience", "leadership"),
+                           ("role_keywords", "role")):
+            for v in sem.get(fld, []):
+                if concept_overlap(v, concept) >= 0.55 and 0.72 > best_strength:
+                    best_strength, best_ev, best_status = 0.72, [
+                        EvidenceItem(type="semantic", text=f"{label}: {v}", detail={"inferred": True})
+                    ], TriState.TRUE
+
+    # 3. concept-vs-career cross-encoder (criterion-level, not whole query, spec §26)
+    if best_strength < 0.6 and settings.reranker_enabled:
+        try:
+            from app.services.reranker import cross_encode
+
+            snippet = _career_snippet(facts)
+            ce = cross_encode(concept, [snippet])[0] if snippet else 0.0
+        except Exception:  # noqa: BLE001
+            ce = 0.0
+        if ce >= 0.5:
+            strength = 0.35 + ce * 0.3
+            if strength > best_strength:
+                best_strength, best_ev, best_status = strength, [
+                    EvidenceItem(type="semantic_relevance",
+                                 text="career profile is semantically consistent with this concept",
+                                 detail={"cross_encoder": round(ce, 3)})
+                ], TriState.UNKNOWN  # a similarity signal alone isn't a confident TRUE
+
+    if best_strength < _REQUIRED_MIN:
+        return 0.0, [], TriState.UNKNOWN
+    return round(best_strength, 3), best_ev, best_status
+
+
+# ─────────────────────── dispatch ───────────────────────
+
 _STRATEGIES = {
     CriterionType.SKILL: _score_skill,
     CriterionType.DOMAIN: _score_domain,
@@ -332,36 +481,78 @@ _STRATEGIES = {
 
 def _score_one(
     facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
-) -> tuple[float, list[EvidenceItem]]:
+) -> tuple[float, list[EvidenceItem], str | None]:
+    """Returns ``(strength, evidence, status)``. ``status`` is a TriState for
+    semantic criteria, else ``None``."""
     try:
-        if crit.type == CriterionType.CURRENT_COMPANY:
-            return _score_company(
-                facts, crit.value, want_current=True,
-                resolved_ids=ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None,
+        # judge verdict (upstream LLM pass) overrides for semantic criteria
+        jr = ctx.judge_results.get(facts.person.id, {}).get(crit.id)
+        if jr and crit.type in _SEMANTIC_TYPES:
+            return (
+                float(jr.get("match_strength", 0.0)),
+                [EvidenceItem(type="semantic", text=jr.get("reason", "")[:220],
+                              detail={"confidence": jr.get("confidence"), "judge": True,
+                                      "evidence": jr.get("evidence", [])[:3]})]
+                if jr.get("status") == TriState.TRUE else [],
+                jr.get("status"),
             )
-        if crit.type == CriterionType.PAST_COMPANY:
-            return _score_company(
-                facts, crit.value, want_current=False,
-                resolved_ids=ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None,
+
+        if crit.type == CriterionType.SEMANTIC_CONCEPT:
+            return _score_semantic_concept(facts, crit, ctx)
+        if crit.type == CriterionType.COMPANY_CATEGORY:
+            return _score_company_category(facts, crit, ctx)
+
+        if crit.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY):
+            want = crit.type == CriterionType.CURRENT_COMPANY
+            rids = ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None
+            s, e = _combine_over_values(
+                crit, lambda v: _score_company(facts, v, want_current=want, resolved_ids=rids)
             )
+            return s, e, None
+
         strat = _STRATEGIES.get(crit.type, _score_keyword)
-        return strat(facts, crit.value)
+        s, e = _combine_over_values(crit, lambda v: strat(facts, v))
+        return s, e, None
     except Exception:  # noqa: BLE001 — a matcher bug must not kill a search
+        return 0.0, [], None
+
+
+def _combine_over_values(crit: SearchCriterion, scorer) -> tuple[float, list[EvidenceItem]]:
+    """Apply ``scorer(value)`` across ``crit.values`` and combine per operator
+    (spec §13). ANY_OF: best. ALL_OF: min (all must hold). NOT: 1 - best."""
+    vals = crit.values or ([crit.value] if crit.value else [])
+    if not vals:
         return 0.0, []
+    results = [scorer(v) for v in vals]
+    if crit.operator == Operator.ALL_OF:
+        s = min(r[0] for r in results)
+        ev = [item for r in results for item in r[1]]
+        return s, ev
+    if crit.operator == Operator.NOT:
+        best = max(results, key=lambda r: r[0])
+        # matching the value is BAD here — invert. Strong presence -> 0; absence -> 1.
+        return (1.0 - best[0]), (
+            [EvidenceItem(type="experience", text="does not match the excluded criterion", detail={})]
+            if best[0] < _REQUIRED_MIN else best[1]
+        )
+    best = max(results, key=lambda r: r[0])  # ANY_OF
+    return best
+
+
+# ─────────────────────── relevance component ───────────────────────
 
 
 def _cosine_norm(query_emb: bytes | None, profile_emb: bytes | None) -> float:
     if not query_emb or not profile_emb:
         return 0.0
-    from app.services.embeddings import to_array
-
     import numpy as np
+
+    from app.services.embeddings import to_array
 
     q, v = to_array(query_emb), to_array(profile_emb)
     if q.shape != v.shape:
         return 0.0
-    cos = float(np.dot(q, v))
-    return max(0.0, min(1.0, cos / 0.6))  # treat cos>=0.6 as a perfect semantic match
+    return max(0.0, min(1.0, float(np.dot(q, v)) / 0.6))
 
 
 def _relevance_component(facts: ProfileFacts, ctx: ScoringContext, weight: float) -> ScoreComponent:
@@ -375,34 +566,17 @@ def _relevance_component(facts: ProfileFacts, ctx: ScoringContext, weight: float
         note = "embedding similarity"
     strength = round(max(0.0, min(1.0, strength)), 3)
     return ScoreComponent(
-        criterion="Overall relevance to your query",
-        criterion_id="relevance",
-        type="relevance",
-        weight=round(weight, 2),
-        match_strength=strength,
-        score=round(weight * strength, 2),
-        required=False,
-        evidence=[
-            EvidenceItem(
-                type="semantic",
-                text=f"Whole-profile semantic match to the query ({note})",
-                detail={"embedding": round(emb, 3), "reranker": round(ce, 3) if ce is not None else None},
-            )
-        ]
-        if strength > 0
-        else [],
+        criterion="Overall relevance to your query", criterion_id="relevance", type="relevance",
+        weight=round(weight, 2), match_strength=strength, score=round(weight * strength, 2), required=False,
+        evidence=[EvidenceItem(type="semantic_relevance", text=f"Whole-profile semantic match to the query ({note})",
+                               detail={"embedding": round(emb, 3), "reranker": round(ce, 3) if ce is not None else None})]
+        if strength > 0 else [],
     )
 
 
-#: query types that are exact lookups — a strong one means the query is precise,
-#: so the fuzzy whole-profile relevance signal should not dilute it much.
 _EXACT_TYPES = {
-    CriterionType.CURRENT_COMPANY,
-    CriterionType.PAST_COMPANY,
-    CriterionType.EDUCATION,
-    CriterionType.CERTIFICATION,
-    CriterionType.LANGUAGE,
-    CriterionType.LOCATION,
+    CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY, CriterionType.EDUCATION,
+    CriterionType.CERTIFICATION, CriterionType.LANGUAGE, CriterionType.LOCATION,
 }
 
 
@@ -410,11 +584,9 @@ def _effective_relevance_weight(parsed: ParsedSearchQuery) -> float:
     base = max(0.0, min(60.0, settings.relevance_weight))
     if not parsed.criteria or base == 0.0:
         return 0.0
-    strongest_exact = max(
-        (c.weight for c in parsed.criteria if c.type in _EXACT_TYPES), default=0.0
-    )
+    strongest_exact = max((c.weight for c in parsed.criteria if c.type in _EXACT_TYPES), default=0.0)
     if strongest_exact >= 55:
-        return base * 0.25   # precise lookup — relevance is a light tiebreak only
+        return base * 0.25
     if strongest_exact >= 35:
         return base * 0.55
     return base
@@ -433,32 +605,27 @@ def score_candidate(
     scale = (100.0 - rel_w) / 100.0
 
     for crit in parsed.criteria:
-        strength, ev = _score_one(facts, crit, ctx)
+        strength, ev, status = _score_one(facts, crit, ctx)
         eff_weight = crit.weight * scale
         score = round(eff_weight * strength, 2)
-        components.append(
-            ScoreComponent(
-                criterion=_label(crit),
-                criterion_id=crit.id,
-                type=crit.type,
-                weight=round(eff_weight, 2),
-                match_strength=round(strength, 3),
-                score=score,
-                required=crit.required,
-                evidence=ev,
-            )
-        )
+        components.append(ScoreComponent(
+            criterion=_label(crit), criterion_id=crit.id, type=crit.type,
+            weight=round(eff_weight, 2), match_strength=round(strength, 3), score=score,
+            required=crit.required, evidence=ev,
+        ))
+
         if crit.required and strength < _REQUIRED_MIN:
-            return ScoredCandidate(
-                person=facts.person,
-                match_score=0.0,
-                components=components,
-                evidence=[],
-                excluded_reason=f"required criterion not met: {crit.value}",
-            )
+            if crit.type in _SEMANTIC_TYPES:
+                # spec §15/§28 — exclude only on a confident FALSE, never on UNKNOWN
+                if status == TriState.FALSE:
+                    return _excluded(facts.person, components, crit)
+                # UNKNOWN required semantic: don't exclude, contributes 0
+            else:
+                return _excluded(facts.person, components, crit)
+
         total += score
         if strength >= _MATCHED_MIN:
-            matched.append(crit.value)
+            matched.append(_label(crit))
             all_evidence.extend(ev)
 
     if rel_w > 0:
@@ -469,35 +636,44 @@ def score_candidate(
             all_evidence.extend(rc.evidence)
 
     return ScoredCandidate(
-        person=facts.person,
-        match_score=round(min(100.0, total), 1),
-        components=components,
-        evidence=_dedupe_evidence(all_evidence),
-        matched_criteria=matched,
+        person=facts.person, match_score=round(min(100.0, total), 1), components=components,
+        evidence=_dedupe_evidence(all_evidence), matched_criteria=matched,
+    )
+
+
+def _excluded(person: Person, components: list[ScoreComponent], crit: SearchCriterion) -> ScoredCandidate:
+    return ScoredCandidate(
+        person=person, match_score=0.0, components=components, evidence=[],
+        excluded_reason=f"required criterion not met: {crit.concept or crit.value}",
     )
 
 
 def _label(c: SearchCriterion) -> str:
+    val = " or ".join(c.values) if len(c.values) > 1 else (c.value or c.concept or "")
     pretty = {
-        CriterionType.CURRENT_COMPANY: f"Currently at {c.value}",
-        CriterionType.PAST_COMPANY: f"Previously at {c.value}",
-        CriterionType.SKILL: c.value,
-        CriterionType.DOMAIN: c.value,
-        CriterionType.TITLE: f"{c.value} role",
-        CriterionType.EDUCATION: f"Studied / attended {c.value}",
-        CriterionType.LOCATION: f"Located in {c.value}",
-        CriterionType.SENIORITY: f"{c.value.title()} level",
-        CriterionType.KEYWORD: c.value,
-        CriterionType.CERTIFICATION: f"{c.value} certification",
-        CriterionType.LANGUAGE: f"Speaks {c.value}",
-        CriterionType.PUBLICATION: f"Published on {c.value}" if c.value else "Has publications",
+        CriterionType.CURRENT_COMPANY: f"Currently at {val}",
+        CriterionType.PAST_COMPANY: f"Previously at {val}",
+        CriterionType.SKILL: val,
+        CriterionType.DOMAIN: val,
+        CriterionType.TITLE: f"{val} role",
+        CriterionType.EDUCATION: f"Studied / attended {val}",
+        CriterionType.LOCATION: f"Located in {val}",
+        CriterionType.SENIORITY: f"{val.title()} level",
+        CriterionType.KEYWORD: val,
+        CriterionType.CERTIFICATION: f"{val} certification",
+        CriterionType.LANGUAGE: f"Speaks {val}",
+        CriterionType.PUBLICATION: f"Published on {val}" if val else "Has publications",
+        CriterionType.SEMANTIC_CONCEPT: c.concept or val,
+        CriterionType.COMPANY_CATEGORY: f"Works at a {c.concept or val} company"
+        + ({Scope.PAST_COMPANY: " (past)", Scope.CURRENT_COMPANY: " (current)"}.get(c.scope, "")),
     }
-    return pretty.get(c.type, c.value)
+    if c.operator == Operator.NOT:
+        return f"NOT {pretty.get(c.type, val)}"
+    return pretty.get(c.type, val)
 
 
 def _dedupe_evidence(items: list[EvidenceItem]) -> list[EvidenceItem]:
-    seen = set()
-    out = []
+    seen, out = set(), []
     for it in items:
         key = (it.type, it.text)
         if key not in seen:

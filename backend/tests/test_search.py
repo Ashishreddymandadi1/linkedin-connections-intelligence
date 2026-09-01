@@ -55,9 +55,10 @@ def test_required_flag_from_who_clause():
 
 
 class _Exp:
-    def __init__(self, position, company, sy, ey, current, desc=None, skills=None):
+    def __init__(self, position, company, sy, ey, current, desc=None, skills=None, company_id=None):
         self.position, self.company_name, self.start_year, self.end_year = position, company, sy, ey
         self.is_current, self.description, self.skills_json = current, desc, skills or []
+        self.company_id = company_id
         self.company_linkedin_url = self.location = self.duration_text = None
         self.employment_type = self.workplace_type = None
 
