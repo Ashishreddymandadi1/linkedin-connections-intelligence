@@ -30,26 +30,45 @@ log = logging.getLogger("app.search")
 def run_connection_search(db: Session, *, dataset_id: str, query: str) -> SearchResponse:
     parsed, provider, model = interpret_query(query)
     log.info("query %r -> %d criteria via %s", query, len(parsed.criteria), provider)
-    llm_available = provider in ("groq:primary", "openrouter:free")
+    # any real LLM answered (not the deterministic fallback) -> downstream LLM
+    # steps (reasons, judge, rerank) are worth attempting (spec §29)
+    llm_available = provider != "deterministic"
 
     query_embedding = _maybe_embed(query)
     candidates, total = get_candidates(db, dataset_id, parsed, query_embedding)
+    pids = [p.id for p in candidates]
+
+    # bulk-load every fact once for the whole pool (spec §31 — no per-candidate N+1)
+    facts_cache = {
+        "experiences": repo.bulk_experiences(db, pids),
+        "education": repo.bulk_education(db, pids),
+        "skills": repo.bulk_skills(db, pids),
+        "certifications": repo.bulk_certifications(db, pids),
+        "languages": repo.bulk_languages(db, pids),
+        "publications": repo.bulk_publications(db, pids),
+        "semantics": repo.bulk_semantics(db, pids),
+        "embeddings": repo.bulk_embeddings_by_person(db, pids),
+    }
 
     ctx = ScoringContext(
         query_embedding=query_embedding,
         company_ids_by_criterion=_resolve_company_ids(db, dataset_id, parsed),
+        company_class=_pool_company_class(db, parsed, facts_cache["experiences"]),
     )
 
-    # pass 1 — deterministic criteria + embedding relevance
-    facts_by_id: dict = {}
+    facts_by_id: dict = {p.id: load_facts(db, p, facts_cache) for p in candidates}
+
+    # pass 1 — deterministic facts + assertion/company-class concepts + embedding relevance
     scored: list[ScoredCandidate] = []
     for person in candidates:
-        facts = load_facts(db, person)
-        facts_by_id[person.id] = facts
-        result = score_candidate(facts, parsed, ctx)
+        result = score_candidate(facts_by_id[person.id], parsed, ctx)
         if result.excluded_reason or result.match_score < settings.min_match_score:
             continue
         scored.append(result)
+    scored.sort(key=lambda s: s.match_score, reverse=True)
+
+    # semantic judge — bounded, batched LLM pass for ambiguous concept criteria
+    scored = _maybe_judge(db, query, parsed, scored, facts_by_id, candidates, ctx, llm_available)
     scored.sort(key=lambda s: s.match_score, reverse=True)
 
     # rerank pool — cross-encoder over the top RERANK_POOL, then re-score
@@ -132,8 +151,8 @@ def load_search(db: Session, search_id: str) -> SearchResponse | None:
 
 
 def _resolve_company_ids(db: Session, dataset_id: str, parsed: ParsedSearchQuery) -> dict[str, set[str]]:
-    """Map each company criterion to the LinkedIn company_ids that its value
-    resolves to within this dataset (via fuzzy name match on the index keys)."""
+    """Map each company criterion to the LinkedIn company_ids its value(s)
+    resolve to within this dataset (fuzzy name match on the index keys)."""
     company_crits = [
         c for c in parsed.criteria
         if c.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY)
@@ -144,13 +163,88 @@ def _resolve_company_ids(db: Session, dataset_id: str, parsed: ParsedSearchQuery
     out: dict[str, set[str]] = {}
     for c in company_crits:
         ids: set[str] = set()
-        target = norm_company(c.value)
-        for name_key, cids in index.items():
-            if name_key == target or company_matches(name_key, c.value):
-                ids |= cids
+        for value in (c.values or [c.value]):
+            target = norm_company(value)
+            for name_key, cids in index.items():
+                if name_key == target or company_matches(name_key, value):
+                    ids |= cids
         if ids:
             out[c.id] = ids
     return out
+
+
+def _pool_company_class(db: Session, parsed: ParsedSearchQuery, exp_by_person: dict) -> dict:
+    """Classify (once, cached) the distinct employers that appear in the
+    candidate pool — only when the query actually asks about company category /
+    industry, and bounded to the pool's companies. Every later search reuses the
+    cache (spec §4/§36 — batched, cached, never per-search-per-company)."""
+    wants_company_semantics = any(
+        c.type in (CriterionType.COMPANY_CATEGORY, CriterionType.SEMANTIC_CONCEPT) for c in parsed.criteria
+    )
+    seen: dict[tuple, tuple] = {}
+    for exps in exp_by_person.values():
+        for e in exps:
+            if e.company_name:
+                seen.setdefault((e.company_id, e.company_name), (e.company_id, e.company_name, e.company_linkedin_url))
+    companies = list(seen.values())
+    if not companies:
+        return {}
+    if not wants_company_semantics or not settings.company_classification_enabled:
+        # cache-only — don't spend LLM calls if the query didn't ask
+        from app.services.company_intel import company_key
+
+        keys = [company_key(cid, nm) for cid, nm, _ in companies]
+        rows = repo.get_company_semantics(db, keys)
+        from app.services.company_intel import to_dict
+
+        return {k: to_dict(r) for k, r in rows.items()}
+    from app.services.company_intel import get_or_classify
+
+    result = get_or_classify(db, companies)
+    db.commit()
+    return result
+
+
+def _maybe_judge(db, query, parsed, scored, facts_by_id, candidates, ctx, llm_available):
+    """Batched LLM judge for ambiguous semantic-concept criteria (spec §16-18)."""
+    if not settings.semantic_judge_enabled or not llm_available:
+        return scored
+    sem_crits = [c for c in parsed.criteria if c.type in (CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY)]
+    if not sem_crits:
+        return scored
+
+    lo, hi = settings.semantic_judge_low, settings.semantic_judge_high
+    by_person = {c.person.id: c for c in scored}
+    ambiguous_ids = set()
+    for cand in scored[: settings.semantic_judge_pool]:
+        for comp in cand.components:
+            if comp.type in ("semantic_concept", "company_category") and lo <= comp.match_strength <= hi:
+                ambiguous_ids.add(cand.person.id)
+    if not ambiguous_ids:
+        return scored
+
+    from app.services.semantic_judge import judge
+
+    to_judge = [
+        (next(p for p in candidates if p.id == pid), facts_by_id[pid])
+        for pid in ambiguous_ids
+        if pid in facts_by_id
+    ][: settings.semantic_judge_pool]
+    verdicts = judge(db, query, sem_crits, to_judge, ctx)
+    if not verdicts:
+        return scored
+
+    ctx.judge_results.update(verdicts)
+    rescored = []
+    for cand in scored:
+        if cand.person.id in verdicts:
+            r = score_candidate(facts_by_id[cand.person.id], parsed, ctx)
+            if r.excluded_reason or r.match_score < settings.min_match_score:
+                continue
+            rescored.append(r)
+        else:
+            rescored.append(cand)
+    return rescored
 
 
 def _candidate_text(db: Session, cand: ScoredCandidate, facts_by_id: dict) -> str:
@@ -214,15 +308,18 @@ def _to_result_item(
     p = cand.person
     reason = generate_reason(cand, query, allow_llm=use_llm_reason)
 
-    skill_terms = {
-        c.value.lower() for c in parsed.criteria if c.type in (CriterionType.SKILL, CriterionType.DOMAIN)
-    }
-    company_terms = {
-        c.value.lower()
-        for c in parsed.criteria
-        if c.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY)
-    }
-    edu_terms = {c.value.lower() for c in parsed.criteria if c.type == CriterionType.EDUCATION}
+    def _terms(*types: str) -> set[str]:
+        return {
+            v.lower()
+            for c in parsed.criteria if c.type in types
+            for v in (c.values or [c.value] or [c.concept or ""]) if v
+        }
+
+    skill_terms = _terms(CriterionType.SKILL, CriterionType.DOMAIN, CriterionType.SEMANTIC_CONCEPT)
+    company_terms = _terms(
+        CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY, CriterionType.COMPANY_CATEGORY
+    )
+    edu_terms = _terms(CriterionType.EDUCATION)
 
     exps = repo.get_experiences(db, p.id)
     rel_exp = [

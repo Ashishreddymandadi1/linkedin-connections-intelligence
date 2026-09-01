@@ -66,7 +66,7 @@ def get_or_classify(
     out: dict[str, dict] = {}
     for k, _cid, name in keyed:
         row = cached.get(k)
-        out[k] = _to_dict(row) if row else _unknown_stub(name)
+        out[k] = to_dict(row) if row else _unknown_stub(name)
     return out
 
 
@@ -84,7 +84,7 @@ def _unknown_stub(name: str | None) -> dict:
     }
 
 
-def _to_dict(row) -> dict:
+def to_dict(row) -> dict:  # public — used by search_service._pool_company_class
     return {
         "display_name": row.display_name,
         "industries": row.industries or [],
