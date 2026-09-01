@@ -1,8 +1,20 @@
-"""Natural-language query → weighted structured criteria (spec §30–§32).
+"""Natural-language query → a semantic search plan (spec §1–§3, §13, §30–§32, v3).
 
-Primary path: free-LLM chain producing a ``ParsedSearchQuery`` (weights forced to
-sum to 100 by the schema validator). Fallback: a deterministic regex/keyword
-parser that always runs and is good enough on the common query shapes.
+Primary path: free-LLM chain producing a ``ParsedSearchQuery`` whose criteria
+can be exact facts (company/school/location/...) OR semantic concepts
+(industry experience, company category, leadership, mentorship, ...).
+MEANING over word occurrence: "worked in tech" must become a
+``semantic_concept``, never a literal company/keyword search; "startup" must
+become a ``company_category`` evaluated against the person's actual employer,
+never a company named "startup"; "Memphis or Nashville" must become one
+criterion with two values and ANY_OF, never a single mangled string.
+
+Fallback: a deterministic regex parser that always runs when every LLM
+provider is down. It preserves the concrete, checkable parts of a query
+(locations incl. OR, companies, schools, seniority, titles) — it does NOT try
+to fabricate semantic-concept understanding without a model; unresolvable
+concepts become low-weight ``semantic_concept``/``keyword`` criteria rather
+than being silently dropped.
 """
 from __future__ import annotations
 
@@ -10,7 +22,7 @@ import logging
 import re
 
 from app.config import settings
-from app.constants import CriterionType
+from app.constants import CriterionType, Operator, Scope
 from app.schemas import ParsedSearchQuery, SearchCriterion
 from app.services.llm.router import generate_structured
 from app.services.matching import seniority_rank
@@ -28,36 +40,64 @@ _KNOWN_SKILLS = {
 }
 
 _SYSTEM = (
-    "You convert a recruiter/networking search into weighted structured criteria. "
-    "Output JSON only. Each criterion has: id (short slug), type (one of "
-    "current_company, past_company, skill, domain, title, education, location, seniority, "
-    "certification, language, publication, keyword), "
-    "value (the concrete thing to match), weight (number), required (boolean). "
-    "Use `certification` for 'has an AWS cert' (value 'AWS'), `language` for 'speaks "
-    "Mandarin' (value 'Mandarin'), `publication` for 'has published' (value '' or the topic). "
-    "The query's own emphasis decides the weights — 'people who went to Stanford' is mostly an "
-    "education criterion; 'backend engineers currently at Microsoft' weights current_company and "
-    "title highly. A criterion is required only when the query clearly demands it "
-    "('currently at Google who know Java' → Google required, Java preferred). "
-    "Weights MUST sum to 100."
+    "You convert a recruiter/networking search into a structured search plan. Output JSON only.\n\n"
+    "Each criterion has: id (short slug), type, weight (points, all criteria sum to 100), "
+    "required (bool). Depending on type, also set:\n"
+    "  - value OR values (a list) — for exact facts: current_company, past_company, education, "
+    "location, certification, language, publication, title, skill, keyword. Use `values` with "
+    "several entries + operator=ANY_OF for an OR ('Memphis or Nashville' -> values: "
+    "[\"Memphis\",\"Nashville\"], operator: ANY_OF). Use operator=ALL_OF when the query clearly "
+    "wants both ('Amazon and Microsoft experience' -> past_company values [Amazon, Microsoft], "
+    "ALL_OF). operator=NOT excludes ('not currently at Amazon').\n"
+    "  - concept + scope — for semantic_concept and company_category ONLY (see below).\n\n"
+    "CRITICAL - distinguish FACTS from CONCEPTS:\n"
+    "A fact is something that either literally appears on a LinkedIn profile as a field: a company "
+    "name, a school, a city, a certification, a language, an explicit skill. Use the concrete "
+    "current_company/past_company/education/location/certification/language/skill types for these, "
+    "with the real-world value the user means (e.g. 'Google', 'Stanford', 'Nashville').\n"
+    "A CONCEPT is something that must be judged from someone's career as a whole - it is NEVER a "
+    "literal string to search for on the profile:\n"
+    "  - 'worked in tech' / 'technology professional' / 'fintech engineer' / 'healthcare experience' "
+    "-> type: semantic_concept, concept: a short description of the industry/domain (e.g. "
+    "'professional experience in the technology industry'), scope: any_experience or career. "
+    "NEVER emit current_company/keyword with value 'tech' or 'FAANG' for this.\n"
+    "  - 'startup' / 'big tech' / 'FAANG' / 'consulting firm' as a description of WHERE someone "
+    "works -> type: company_category, concept: the category name ('startup', 'big tech', "
+    "'consulting'), scope: current_company or past_company or any_experience depending on the "
+    "query ('now at a startup' -> scope current_company; 'ex-big-tech' -> scope past_company). "
+    "NEVER emit current_company with value 'startup' or 'FAANG' - those are not company names.\n"
+    "  - 'engineering leader' / 'mentor' / 'advisor' / 'coach' -> type: semantic_concept, "
+    "category-like concept ('engineering leadership', 'mentors other engineers'), scope: career.\n"
+    "  - seniority words (CXO, senior, staff, director, VP, founder) -> type: seniority, value: the "
+    "word. 'CXO' covers CEO/CTO/CFO/COO/CMO/CPO/Chief-anything - do not require the literal word "
+    "'CXO' on the profile.\n\n"
+    "Weights reflect the query's own emphasis. A criterion is required only when the query clearly "
+    "demands it as a filter, not a preference - 'currently at Google who knows Java' -> Google "
+    "required, Java preferred. 'Former Amazon people now at startups' -> BOTH past_company(Amazon) "
+    "and company_category(startup, scope current_company) are required - it is a single query about "
+    "two facts that must both hold, not a nice-to-have. Weights MUST sum to 100."
 )
 
 
 _MODAL_RE = re.compile(r"\b(must|only|required|has to|need to have|exclusively)\b", re.I)
-_SOFT_TYPES = {CriterionType.SKILL, CriterionType.DOMAIN, CriterionType.KEYWORD, CriterionType.SENIORITY, CriterionType.TITLE}
+#: types the model tends to over-require; soften unless the query uses modal language.
+#: Semantic/company-category/location/company/education criteria are NOT auto-softened -
+#: whether they are hard filters is a real per-query judgment, not a blanket rule
+#: (spec §2/§3 — "Former Amazon people now at startups" needs BOTH required).
+_SOFT_TYPES = {CriterionType.SKILL, CriterionType.KEYWORD, CriterionType.TITLE}
 
 
 def _soften_requirements(parsed: ParsedSearchQuery, query: str) -> ParsedSearchQuery:
-    """A skill/domain/title is a hard requirement only when the query says so
-    ('must know X'). Company/education/location keep the model's flag. Also cap
-    total required criteria so an over-eager model can't exclude everyone."""
+    """Skills/keywords/titles are hard requirements only when the query says so
+    ('must know X'). Cap total required criteria so an over-eager model can't
+    exclude everyone."""
     hard_modal = bool(_MODAL_RE.search(query))
     for c in parsed.criteria:
         if c.type in _SOFT_TYPES and not hard_modal:
             c.required = False
     required = [c for c in parsed.criteria if c.required]
-    if len(required) > 2:
-        for c in sorted(required, key=lambda x: x.weight)[:-2]:
+    if len(required) > 3:
+        for c in sorted(required, key=lambda x: x.weight)[:-3]:
             c.required = False
     return parsed
 
@@ -67,9 +107,9 @@ def interpret_query(query: str) -> tuple[ParsedSearchQuery, str, str | None]:
     if settings.llm_query_interpretation:
         result = generate_structured(
             _SYSTEM,
-            f"Search query: {query!r}\nProduce the criteria JSON.",
+            f"Search query: {query!r}\nProduce the search-plan JSON.",
             ParsedSearchQuery,
-            max_tokens=900,
+            max_tokens=1200,
         )
         if result is not None:
             parsed, provider, model = result
@@ -88,9 +128,26 @@ _AT_RE = re.compile(r"\b(?:works?\s+at|worked\s+at|at)\s+([A-Z][\w&.\- ]+?)(?:\s
 _SCHOOL_RE = re.compile(r"(?:studied at|went to|graduated from|degree from|alum(?:ni|nus)? of|attended)\s+([A-Z][\w&.\- ]+)", re.I)
 _STUDY_RE = re.compile(r"stud(?:ied|ying)\s+([a-z][\w ]+?)(?:\s+(?:at|and|,|\.|$))", re.I)
 
+#: "in Memphis or Nashville" / "in Memphis, Nashville, or Atlanta" — a
+#: preposition, then 2+ capitalized place names joined by commas/or.
+_LOCATION_OR_RE = re.compile(
+    r"\b(?:in|from|near|based in)\s+((?:[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*)*)"
+    r"(?:\s*,\s*(?:or\s+)?(?:[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*)*)"
+    r"|\s+or\s+(?:[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*)*))+)",
+)
+_COMPANY_CATEGORY_WORDS = {
+    "startup": "startup", "startups": "startup",
+    "big tech": "big tech", "faang": "big tech", "big technology": "big tech",
+}
+
 
 def _clean_name(s: str) -> str:
     return re.sub(r"\s+(who|that|and|with)\b.*$", "", s.strip(" .,")).strip()
+
+
+def _split_or_list(blob: str) -> list[str]:
+    parts = re.split(r"\s*,\s*(?:or\s+)?|\s+or\s+", blob.strip())
+    return [_clean_name(p) for p in parts if _clean_name(p)]
 
 
 def _deterministic_parse(query: str) -> ParsedSearchQuery:
@@ -99,18 +156,47 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
     crits: list[SearchCriterion] = []
     used_spans: list[str] = []
 
-    for m in re.finditer(r"(previously|formerly|ex[- ])\s*(?:worked\s+(?:at|for)\s+)?([A-Z][\w&.\- ]+)", q, re.I):
-        name = _clean_name(m.group(2))
-        if name:
-            crits.append(SearchCriterion(id=f"past_{_slug(name)}", type=CriterionType.PAST_COMPANY, value=name, weight=30, required=False))
+    # locations FIRST, with OR support — this was silently dropped before (spec §11/§13)
+    loc_m = _LOCATION_OR_RE.search(q)
+    if loc_m:
+        places = _split_or_list(loc_m.group(1))
+        if places:
+            crits.append(
+                SearchCriterion(
+                    id="location", type=CriterionType.LOCATION, values=places,
+                    operator=Operator.ANY_OF, weight=35, required=True,
+                )
+            )
+            used_spans.extend(p.lower() for p in places)
+
+    for m in re.finditer(
+        r"(?i:previously|formerly|former|ex[- ])\s*(?i:worked\s+(?:at|for)\s+)?"
+        r"([A-Z][\w&.\-]*(?:\s+(?:[A-Z][\w&.\-]*|of|and|&))*)",
+        q,
+    ):
+        name = _clean_name(m.group(1))
+        name = re.sub(r"\s+(?:of|and|&)$", "", name).strip()
+        if name and name.lower() not in _COMPANY_CATEGORY_WORDS:
+            crits.append(SearchCriterion(id=f"past_{_slug(name)}", type=CriterionType.PAST_COMPANY, value=name, weight=30, required=False, scope=Scope.PAST_COMPANY))
             used_spans.append(name.lower())
 
     for m in _CURRENT_RE.finditer(q):
         tail = q[m.end():]
         name = _clean_name(re.split(r"\b(who|that|and)\b", tail)[0])
-        if name:
-            crits.append(SearchCriterion(id=f"cur_{_slug(name)}", type=CriterionType.CURRENT_COMPANY, value=name, weight=35, required="currently" in ql and " who " in ql))
+        if name and name.lower() not in _COMPANY_CATEGORY_WORDS:
+            crits.append(SearchCriterion(id=f"cur_{_slug(name)}", type=CriterionType.CURRENT_COMPANY, value=name, weight=35, required="currently" in ql and " who " in ql, scope=Scope.CURRENT_COMPANY))
             used_spans.append(name.lower())
+
+    # company categories ("now at startups", "ex-big-tech") — NOT a company name.
+    # Dedupe by resulting CATEGORY (not matched phrase) — "startup"/"startups"
+    # both map to the same category and must not double-add.
+    seen_categories: set[str] = set()
+    for phrase, category in _COMPANY_CATEGORY_WORDS.items():
+        if phrase in ql and category not in seen_categories:
+            seen_categories.add(category)
+            scope = Scope.PAST_COMPANY if re.search(rf"(ex|former|previously)[- ]\w*\s*{re.escape(phrase)}", ql) else Scope.CURRENT_COMPANY
+            crits.append(SearchCriterion(id=f"cat_{_slug(category)}", type=CriterionType.COMPANY_CATEGORY, concept=category, scope=scope, weight=35, required=True))
+            used_spans.append(phrase)
 
     for m in _SCHOOL_RE.finditer(q):
         name = _clean_name(m.group(1))
@@ -152,16 +238,19 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
 
     rank = seniority_rank(ql)
     if rank is not None and rank >= 3:
-        label = next((w for w in ["principal", "staff", "senior", "director", "vp", "lead", "founder", "head"] if w in ql), "senior")
+        label = next((w for w in ["cxo", "principal", "staff", "senior", "director", "vp", "lead", "founder", "head", "ceo", "cto", "cfo", "coo"] if w in ql), "senior")
         crits.append(SearchCriterion(id="seniority", type=CriterionType.SENIORITY, value=label, weight=15, required=False))
 
     for m in re.finditer(r"\b([a-z]+)\s+(engineer|engineers|developer|developers|manager|managers|scientist|scientists|designer|designers|architect|architects)\b", ql):
         title = f"{m.group(1)} {m.group(2)}".rstrip("s")
         crits.append(SearchCriterion(id=f"title_{_slug(title)}", type=CriterionType.TITLE, value=title, weight=20, required=False))
 
-    if not crits:
+    # anything left over that looks like an industry/concept word becomes a
+    # low-weight semantic_concept rather than a literal keyword search — weak,
+    # but never silently dropped, and never a false literal-text match either.
+    if not crits or (len(crits) == 1 and crits[0].type == CriterionType.SENIORITY):
         for kw in _keywords(q):
-            crits.append(SearchCriterion(id=f"kw_{_slug(kw)}", type=CriterionType.KEYWORD, value=kw, weight=10, required=False))
+            crits.append(SearchCriterion(id=f"concept_{_slug(kw)}", type=CriterionType.SEMANTIC_CONCEPT, concept=kw, weight=15, required=False))
     if not crits:
         crits.append(SearchCriterion(id="kw_all", type=CriterionType.KEYWORD, value=q[:60], weight=100, required=False))
 

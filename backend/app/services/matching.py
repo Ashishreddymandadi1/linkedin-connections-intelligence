@@ -138,6 +138,16 @@ _SENIORITY_RANK = {
     "founder": 8,
     "owner": 8,
     "partner": 7,
+    # explicit C-suite abbreviations — a title of literally "CEO" has no
+    # "chief" substring, so it was previously unranked (spec §22)
+    "ceo": 8,
+    "cto": 8,
+    "cfo": 8,
+    "coo": 8,
+    "cmo": 8,
+    "cpo": 8,
+    "ciso": 8,
+    "cio": 8,
 }
 
 
@@ -146,6 +156,28 @@ def seniority_rank(text: str | None) -> int | None:
     if not t:
         return None
     for kw, rank in sorted(_SENIORITY_RANK.items(), key=lambda kv: -len(kv[0])):
-        if kw in t:
+        if re.search(rf"\b{re.escape(kw)}\b", t):
             return rank
     return None
+
+
+def is_cxo_title(title: str | None) -> bool:
+    """True for actual C-suite titles (CEO/CTO/'Chief ... Officer'/founder-as-CXO)
+    — NOT for a title/description that merely mentions working with executives
+    ('sold to CXO customers' must not qualify, spec §22/§35)."""
+    t = norm(title)
+    if not t:
+        return False
+    return bool(re.search(r"\b(ceo|cto|cfo|coo|cmo|cpo|ciso|cio)\b", t)) or "chief" in t
+
+
+def concept_overlap(a: str | None, b: str | None) -> float:
+    """Loose similarity between two short concept phrases — token overlap with
+    a floor for substring containment. Used to match e.g. semantic-assertion
+    concepts / industries / job_families against a criterion's concept text."""
+    na, nb = norm(a), norm(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb or na in nb or nb in na:
+        return 1.0
+    return token_overlap(a, b)
