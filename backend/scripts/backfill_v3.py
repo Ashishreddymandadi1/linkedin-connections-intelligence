@@ -32,9 +32,9 @@ def main(dataset_id: str) -> None:
     finally:
         db.close()
 
-    print("→ classifying companies …")
+    print("-> classifying companies ...")
     classify_companies(dataset_id)
-    print("→ semantic pass + re-embed …")
+    print("-> semantic pass + re-embed ...")
     backfill_semantics(dataset_id)
     print("done.")
 
