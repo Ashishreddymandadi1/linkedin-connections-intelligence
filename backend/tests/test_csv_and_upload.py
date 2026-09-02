@@ -79,4 +79,10 @@ def test_delete_dataset(client):
 def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+    body = r.json()
+    assert body["status"] == "ok"
+    # V4 §12 — llm config block, no secrets, no live calls
+    llm = body["llm"]
+    assert isinstance(llm["priority"], list)
+    assert set(llm) >= {"priority", "anthropic", "groq", "openrouter", "circuit_breakers"}
+    assert "api_key" not in str(llm) and "sk-" not in str(llm)

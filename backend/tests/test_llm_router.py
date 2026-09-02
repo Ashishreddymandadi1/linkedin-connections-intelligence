@@ -1,8 +1,28 @@
+"""Provider routing / fallback / circuit-breaker tests (V4 §13 TEST A–J, §66).
+
+The router must:
+  * try Anthropic first whenever a key is configured (regardless of enable_paid_llm)
+  * stop the chain the moment a provider returns validated output
+  * fall through on ANY failure, fast for unretryable ones (401 / bad workspace)
+  * cool a provider down after an unretryable or repeated-transient failure
+  * return None (→ local search) only when every provider is exhausted
+"""
 from __future__ import annotations
 
+import pytest
 from pydantic import BaseModel
 
-from app.services.llm.base import LLMBadOutput, LLMProvider, LLMRateLimited, LLMUnavailable
+from app.constants import LLMProviderName
+from app.services.llm import circuit
+from app.services.llm.base import (
+    LLMAuthError,
+    LLMBadOutput,
+    LLMConfigError,
+    LLMProvider,
+    LLMRateLimited,
+    LLMTransport,
+    LLMUnavailable,
+)
 from app.services.llm.providers import default_chain
 from app.services.llm.router import generate_structured
 
@@ -10,6 +30,18 @@ from app.services.llm.router import generate_structured
 class Out(BaseModel):
     answer: str
     score: int
+
+
+@pytest.fixture(autouse=True)
+def _clean_breakers():
+    circuit.reset_all()
+    yield
+    circuit.reset_all()
+
+
+@pytest.fixture(autouse=True)
+def _fast_retries(monkeypatch):
+    monkeypatch.setattr("app.services.llm.router.settings.llm_max_retries", 1)
 
 
 class FakeProvider(LLMProvider):
@@ -29,8 +61,14 @@ class FakeProvider(LLMProvider):
             return {"answer": "hi", "score": 5}
         if b == "429":
             raise LLMRateLimited("429", retry_after=0.01)
-        if b == "down":
+        if b == "unavailable":
             raise LLMUnavailable("503")
+        if b == "transport":
+            raise LLMTransport("connection reset")
+        if b == "auth":
+            raise LLMAuthError("401")
+        if b == "config":
+            raise LLMConfigError("anthropic workspace configuration error")
         if b == "badjson":
             raise LLMBadOutput("not json")
         if b == "badschema":
@@ -38,75 +76,173 @@ class FakeProvider(LLMProvider):
         raise AssertionError(b)
 
 
-def test_primary_success():
-    p = FakeProvider("primary", "ok")
-    res = generate_structured("s", "u", Out, chain=[p])
-    assert res is not None
-    model, name, _ = res
-    assert model.answer == "hi" and name == "primary"
+def _run(chain):
+    return generate_structured("s", "u", Out, chain=chain, operation="test")
 
 
-def test_falls_back_on_rate_limit(monkeypatch):
-    monkeypatch.setattr("app.services.llm.router.settings.llm_max_retries", 1)
-    primary = FakeProvider("primary", "429")
-    fallback = FakeProvider("fallback", "ok")
-    res = generate_structured("s", "u", Out, chain=[primary, fallback])
-    assert res is not None
-    _, name, _ = res
-    assert name == "fallback"
-    assert primary.calls == 2  # initial + 1 retry, then give up
+# ─────────────────────────── TEST A ───────────────────────────
+def test_A_anthropic_success_stops_chain():
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "ok")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    groq_f = FakeProvider(LLMProviderName.GROQ_FALLBACK, "ok")
+    res = _run([anth, groq_p, groq_f])
+    assert res and res[1] == LLMProviderName.ANTHROPIC
+    assert anth.calls == 1
+    assert groq_p.calls == 0 and groq_f.calls == 0
 
 
-def test_falls_back_on_unavailable_then_openrouter():
-    a = FakeProvider("groq120", "down")
-    b = FakeProvider("groq20", "down")
-    c = FakeProvider("openrouter", "ok")
-    res = generate_structured("s", "u", Out, chain=[a, b, c])
-    assert res and res[1] == "openrouter"
+# ─────────────────────────── TEST B ───────────────────────────
+def test_B_anthropic_rate_limited_falls_to_groq_primary():
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "429")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    res = _run([anth, groq_p])
+    assert res and res[1] == LLMProviderName.GROQ_PRIMARY
+    assert anth.calls == 2  # initial + 1 retry, then fall through
 
 
-def test_all_exhausted_returns_none():
-    chain = [FakeProvider("a", "down"), FakeProvider("b", "429"), FakeProvider("c", "badjson")]
-    assert generate_structured("s", "u", Out, chain=chain) is None
+# ─────────────────────────── TEST C ───────────────────────────
+def test_C_anthropic_401_no_pointless_retries():
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "auth")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    res = _run([anth, groq_p])
+    assert res and res[1] == LLMProviderName.GROQ_PRIMARY
+    assert anth.calls == 1  # 401 is not retried
+    assert circuit.is_open(LLMProviderName.ANTHROPIC)
+
+
+# ─────────────────────────── TEST D ───────────────────────────
+def test_D_anthropic_workspace_config_error_falls_through():
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "config")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    res = _run([anth, groq_p])
+    assert res and res[1] == LLMProviderName.GROQ_PRIMARY
+    assert anth.calls == 1
+    assert circuit.is_open(LLMProviderName.ANTHROPIC)
+
+
+# ─────────────────────────── TEST E ───────────────────────────
+def test_E_anthropic_and_groq_primary_fail_then_groq_fallback():
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "unavailable")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "unavailable")
+    groq_f = FakeProvider(LLMProviderName.GROQ_FALLBACK, "ok")
+    res = _run([anth, groq_p, groq_f])
+    assert res and res[1] == LLMProviderName.GROQ_FALLBACK
+
+
+# ─────────────────────────── TEST F ───────────────────────────
+def test_F_all_but_openrouter_fail():
+    chain = [
+        FakeProvider(LLMProviderName.ANTHROPIC, "transport"),
+        FakeProvider(LLMProviderName.GROQ_PRIMARY, "unavailable"),
+        FakeProvider(LLMProviderName.GROQ_FALLBACK, "429"),
+        FakeProvider(LLMProviderName.OPENROUTER, "ok"),
+    ]
+    res = _run(chain)
+    assert res and res[1] == LLMProviderName.OPENROUTER
+
+
+# ─────────────────────────── TEST G ───────────────────────────
+def test_G_no_anthropic_key_means_groq_first(monkeypatch):
+    monkeypatch.setattr("app.config.settings.anthropic_api_key", "")
+    monkeypatch.setattr("app.config.settings.groq_api_key", "x")
+    monkeypatch.setattr("app.config.settings.openrouter_api_key", "")
+    names = [p.name for p in default_chain()]
+    assert LLMProviderName.ANTHROPIC not in names
+    assert names[0] == LLMProviderName.GROQ_PRIMARY
+
+
+# ─────────────────────────── TEST H ───────────────────────────
+def test_H_no_provider_available_returns_none():
+    class Unconfigured(FakeProvider):
+        def available(self) -> bool:
+            return False
+
+    assert _run([Unconfigured("x", "ok")]) is None
+
+
+# ─────────────────────────── TEST I ───────────────────────────
+def test_I_configured_key_used_even_when_enable_paid_llm_false(monkeypatch):
+    monkeypatch.setattr("app.config.settings.anthropic_api_key", "sk-ant-test")
+    monkeypatch.setattr("app.config.settings.groq_api_key", "x")
+    monkeypatch.setattr("app.config.settings.enable_paid_llm", False)
+    names = [p.name for p in default_chain()]
+    assert names[0] == LLMProviderName.ANTHROPIC
+
+
+# ─────────────────────────── TEST J ───────────────────────────
+def test_J_returned_provider_is_a_real_name():
+    for behavior_chain, expected in [
+        ([(LLMProviderName.ANTHROPIC, "ok")], LLMProviderName.ANTHROPIC),
+        ([(LLMProviderName.ANTHROPIC, "auth"), (LLMProviderName.GROQ_PRIMARY, "ok")], LLMProviderName.GROQ_PRIMARY),
+    ]:
+        circuit.reset_all()
+        chain = [FakeProvider(n, b) for n, b in behavior_chain]
+        res = _run(chain)
+        assert res and res[1] == expected and res[1] != "deterministic"
+
+
+# ─────────────────────── default_chain ordering ───────────────────────
+def test_default_chain_full_priority_order(monkeypatch):
+    monkeypatch.setattr("app.config.settings.anthropic_api_key", "sk-ant")
+    monkeypatch.setattr("app.config.settings.groq_api_key", "gsk")
+    monkeypatch.setattr("app.config.settings.openrouter_api_key", "or")
+    monkeypatch.setattr("app.config.settings.openrouter_model", "meta/x:free")
+    assert [p.name for p in default_chain()] == [
+        LLMProviderName.ANTHROPIC,
+        LLMProviderName.GROQ_PRIMARY,
+        LLMProviderName.GROQ_FALLBACK,
+        LLMProviderName.OPENROUTER,
+    ]
+
+
+# ─────────────────────── circuit breaker ───────────────────────
+def test_circuit_skips_cooled_provider_then_success_resets():
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "auth")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    _run([anth, groq_p])
+    assert circuit.is_open(LLMProviderName.ANTHROPIC)
+
+    anth2 = FakeProvider(LLMProviderName.ANTHROPIC, "ok")
+    groq2 = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    res = _run([anth2, groq2])
+    assert res and res[1] == LLMProviderName.GROQ_PRIMARY
+    assert anth2.calls == 0  # never attempted while cooling down
+
+
+def test_circuit_trips_after_repeated_transient_failures(monkeypatch):
+    monkeypatch.setattr("app.services.llm.router.settings.llm_max_retries", 0)
+    name = LLMProviderName.GROQ_PRIMARY
+    for _ in range(3):
+        _run([FakeProvider(name, "unavailable"), FakeProvider(LLMProviderName.GROQ_FALLBACK, "ok")])
+    assert circuit.is_open(name)
+
+
+def test_bad_output_does_not_trip_circuit(monkeypatch):
+    monkeypatch.setattr("app.services.llm.router.settings.llm_max_retries", 0)
+    name = LLMProviderName.ANTHROPIC
+    for _ in range(5):
+        _run([FakeProvider(name, "badjson"), FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")])
+    assert not circuit.is_open(name)  # prompt-local, not a provider fault
+
+
+# ─────────────────────── meta / schema validation ───────────────────────
+def test_return_meta_records_attempts():
+    chain = [
+        FakeProvider(LLMProviderName.ANTHROPIC, "429"),
+        FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok"),
+    ]
+    model, name, model_id, meta = generate_structured(
+        "s", "u", Out, chain=chain, operation="query_interpretation", return_meta=True
+    )
+    assert name == LLMProviderName.GROQ_PRIMARY
+    assert meta["operation"] == "query_interpretation"
+    assert meta["selected_provider"] == LLMProviderName.GROQ_PRIMARY
+    assert meta["attempts"][0] == {"provider": LLMProviderName.ANTHROPIC, "status": "rate_limited"}
+    assert meta["attempts"][-1] == {"provider": LLMProviderName.GROQ_PRIMARY, "status": "success"}
 
 
 def test_schema_validation_failure_moves_on():
     bad = FakeProvider("bad", "badschema")
     good = FakeProvider("good", "ok")
-    res = generate_structured("s", "u", Out, chain=[bad, good])
+    res = _run([bad, good])
     assert res and res[1] == "good"
-
-
-def test_paid_provider_only_enters_chain_when_opted_in(monkeypatch):
-    from app.constants import LLMProviderName
-
-    monkeypatch.setattr("app.config.settings.groq_api_key", "x")
-    monkeypatch.setattr("app.config.settings.anthropic_api_key", "sk-ant-test")
-
-    monkeypatch.setattr("app.config.settings.enable_paid_llm", False)
-    assert LLMProviderName.ANTHROPIC not in [p.name for p in default_chain()]
-
-    monkeypatch.setattr("app.config.settings.enable_paid_llm", True)
-    monkeypatch.setattr("app.config.settings.anthropic_first", True)
-    chain = [p.name for p in default_chain()]
-    assert chain[0] == LLMProviderName.ANTHROPIC
-    assert LLMProviderName.GROQ_PRIMARY in chain  # free tier is still the fallback
-
-    monkeypatch.setattr("app.config.settings.anthropic_first", False)
-    assert [p.name for p in default_chain()][-1] == LLMProviderName.ANTHROPIC
-
-    # no key -> not in chain even when the flag is on
-    monkeypatch.setattr("app.config.settings.anthropic_api_key", "")
-    assert LLMProviderName.ANTHROPIC not in [p.name for p in default_chain()]
-
-
-def test_unavailable_provider_skipped():
-    class Unconfigured(FakeProvider):
-        def available(self) -> bool:
-            return False
-
-    skipped = Unconfigured("skipme", "ok")
-    used = FakeProvider("used", "ok")
-    res = generate_structured("s", "u", Out, chain=[skipped, used])
-    assert res and res[1] == "used"
-    assert skipped.calls == 0

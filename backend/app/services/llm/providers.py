@@ -1,4 +1,11 @@
-"""Concrete providers: Groq + OpenRouter (free), and Anthropic (paid, opt-in)."""
+"""Concrete providers: Anthropic (preferred when configured), Groq, OpenRouter.
+
+Provider priority (V4 §2) when every key is set:
+
+    Anthropic -> Groq primary -> Groq fallback -> OpenRouter free
+
+A configured ``ANTHROPIC_API_KEY`` is the opt-in (V4 §1) — no separate flag.
+"""
 from __future__ import annotations
 
 from app.config import settings
@@ -56,7 +63,11 @@ class OpenRouterProvider(LLMProvider):
 
 
 class AnthropicProvider(LLMProvider):
-    """Paid. Only enters the chain when ENABLE_PAID_LLM=true and a key is set."""
+    """Preferred provider whenever ``ANTHROPIC_API_KEY`` is configured (V4 §1).
+
+    A configured key IS the opt-in — ``enable_paid_llm`` is deprecated and no
+    longer gates availability.
+    """
 
     name = LLMProviderName.ANTHROPIC
 
@@ -64,7 +75,7 @@ class AnthropicProvider(LLMProvider):
         self.model = model
 
     def available(self) -> bool:
-        return settings.enable_paid_llm and bool(settings.anthropic_api_key)
+        return bool(settings.anthropic_api_key)
 
     def generate_json(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500) -> dict:
         return messages_json(
@@ -78,14 +89,15 @@ class AnthropicProvider(LLMProvider):
 
 
 def default_chain() -> list[LLMProvider]:
-    free = [
-        GroqProvider(settings.groq_primary_model, LLMProviderName.GROQ_PRIMARY),
-        GroqProvider(settings.groq_fallback_model, LLMProviderName.GROQ_FALLBACK),
-        OpenRouterProvider(settings.openrouter_model),
-    ]
-    paid = AnthropicProvider(settings.anthropic_model)
-    if not paid.available():
-        return free
-    # opt-in: Anthropic first (fast, reliable) with the free tier as the safety net,
-    # unless the operator wants free-first and paid only as a last resort.
-    return [paid, *free] if settings.anthropic_first else [*free, paid]
+    """Build the provider chain from configured keys, in priority order (V4 §2):
+    Anthropic -> Groq primary -> Groq fallback -> OpenRouter. Unconfigured
+    providers are simply omitted (never called)."""
+    chain: list[LLMProvider] = []
+    if settings.anthropic_api_key:
+        chain.append(AnthropicProvider(settings.anthropic_model))
+    if settings.groq_api_key:
+        chain.append(GroqProvider(settings.groq_primary_model, LLMProviderName.GROQ_PRIMARY))
+        chain.append(GroqProvider(settings.groq_fallback_model, LLMProviderName.GROQ_FALLBACK))
+    if settings.openrouter_api_key and settings.openrouter_model.endswith(":free"):
+        chain.append(OpenRouterProvider(settings.openrouter_model))
+    return chain

@@ -86,6 +86,7 @@ def llm_rerank(query: str, candidates: list[dict]) -> dict[str, object] | None:
         f"Query: {query!r}\n\nCandidates:\n{listing}\n\nReturn the reordered ids.",
         RerankResult,
         max_tokens=700,
+        operation="llm_rerank",
     )
     if result is None:
         return None

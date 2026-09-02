@@ -110,6 +110,7 @@ def interpret_query(query: str) -> tuple[ParsedSearchQuery, str, str | None]:
             f"Search query: {query!r}\nProduce the search-plan JSON.",
             ParsedSearchQuery,
             max_tokens=1200,
+            operation="query_interpretation",
         )
         if result is not None:
             parsed, provider, model = result

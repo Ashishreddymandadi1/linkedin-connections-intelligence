@@ -7,7 +7,14 @@ import re
 
 import httpx
 
-from app.services.llm.base import LLMBadOutput, LLMRateLimited, LLMUnavailable
+from app.services.llm.base import (
+    LLMAuthError,
+    LLMBadOutput,
+    LLMConfigError,
+    LLMRateLimited,
+    LLMTransport,
+    LLMUnavailable,
+)
 
 log = logging.getLogger("app.llm")
 
@@ -61,21 +68,23 @@ def chat_json(
     try:
         resp = httpx.post(f"{base_url}/chat/completions", json=payload, headers=headers, timeout=timeout)
     except (httpx.TimeoutException, httpx.TransportError) as e:
-        raise LLMUnavailable(f"transport error: {e}") from e
+        raise LLMTransport(f"transport error: {type(e).__name__}") from e
 
     if resp.status_code == 429:
         ra = resp.headers.get("retry-after")
         raise LLMRateLimited("429 from provider", retry_after=float(ra) if ra and ra.replace(".", "").isdigit() else None)
-    if resp.status_code in (500, 502, 503, 504):
+    if resp.status_code in (500, 502, 503, 504, 529):
         raise LLMUnavailable(f"provider {resp.status_code}")
+    if resp.status_code in (401, 403):
+        raise LLMAuthError(f"provider auth {resp.status_code}")
     if resp.status_code == 404:
-        raise LLMUnavailable("model not found / unavailable")
+        raise LLMConfigError("model not found / unavailable (404)")
     if resp.status_code == 400 and "json_validate_failed" in resp.text:
         # model produced malformed JSON (often truncated) — retryable as bad output
         raise LLMBadOutput("provider could not validate generated JSON (likely truncated)")
     if resp.status_code >= 400:
-        # 401/403/other — config problem, not worth retrying this provider
-        raise LLMUnavailable(f"provider error {resp.status_code}: {resp.text[:200]}")
+        # remaining 4xx (400 bad model/params, 422, …) won't change on retry
+        raise LLMConfigError(f"provider error {resp.status_code}")
 
     body = resp.json()
     try:

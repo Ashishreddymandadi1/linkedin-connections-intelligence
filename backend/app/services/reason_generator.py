@@ -40,7 +40,9 @@ def generate_reason(candidate: ScoredCandidate, query: str, *, allow_llm: bool =
             + "\n".join(ev_lines)
             + "\n\nWrite the explanation."
         )
-        result = generate_structured(_SYSTEM, user, _Reason, max_tokens=300)
+        result = generate_structured(
+            _SYSTEM, user, _Reason, max_tokens=300, operation="reason_generation",
+        )
         if result is not None:
             return result[0].reason.strip()
         log.info("reason generator: using deterministic template")

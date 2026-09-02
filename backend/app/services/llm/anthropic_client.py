@@ -10,7 +10,14 @@ import logging
 
 import httpx
 
-from app.services.llm.base import LLMBadOutput, LLMRateLimited, LLMUnavailable
+from app.services.llm.base import (
+    LLMAuthError,
+    LLMBadOutput,
+    LLMConfigError,
+    LLMRateLimited,
+    LLMTransport,
+    LLMUnavailable,
+)
 from app.services.llm.openai_compatible import _extract_json
 
 log = logging.getLogger("app.llm")
@@ -50,7 +57,7 @@ def messages_json(
     try:
         resp = httpx.post(_URL, json=payload, headers=headers, timeout=timeout)
     except (httpx.TimeoutException, httpx.TransportError) as e:
-        raise LLMUnavailable(f"transport error: {e}") from e
+        raise LLMTransport(f"transport error: {type(e).__name__}") from e
 
     if resp.status_code == 429:
         ra = resp.headers.get("retry-after")
@@ -60,8 +67,16 @@ def messages_json(
         )
     if resp.status_code in (500, 502, 503, 504, 529):
         raise LLMUnavailable(f"anthropic {resp.status_code}")
+    if resp.status_code in (401, 403):
+        raise LLMAuthError(f"anthropic auth {resp.status_code}")
+    if resp.status_code == 400 and "workspace" in resp.text.lower():
+        # identity-linked key without / with a wrong ANTHROPIC_WORKSPACE_ID (V4 §7)
+        raise LLMConfigError("anthropic workspace configuration error")
+    if resp.status_code in (400, 404):
+        # unknown model, malformed request — identical on retry
+        raise LLMConfigError(f"anthropic request rejected ({resp.status_code})")
     if resp.status_code >= 400:
-        raise LLMUnavailable(f"anthropic error {resp.status_code}: {resp.text[:200]}")
+        raise LLMConfigError(f"anthropic error {resp.status_code}")
 
     body = resp.json()
     try:

@@ -1,8 +1,18 @@
-"""LLM provider abstraction (spec §20).
+"""LLM provider abstraction (spec §20, V4 §6).
 
 The app never depends on a concrete provider — only on ``LLMProvider`` and the
 router. ``generate_json`` returns raw parsed JSON; schema validation happens in
 the router so every provider benefits from the same retry-on-invalid logic.
+
+Error taxonomy (V4 §6) — every failure is one of six categories so the router
+knows whether retrying the SAME provider can possibly help:
+
+  authentication_error    LLMAuthError      401/403                     no retry
+  configuration_error     LLMConfigError    bad workspace / model / 400 no retry
+  rate_limited            LLMRateLimited    429                         retry w/ Retry-After
+  temporarily_unavailable LLMUnavailable    500/502/503/504/529         retry w/ backoff
+  transport_error         LLMTransport      timeout / connection reset  retry w/ backoff
+  bad_output              LLMBadOutput      non-JSON / schema mismatch  retry (prompt-local)
 """
 from __future__ import annotations
 
@@ -11,21 +21,58 @@ from dataclasses import dataclass
 
 
 class LLMError(RuntimeError):
-    pass
+    #: stable machine-readable category (V4 §6) — used for logging + circuit breaker
+    category = "error"
+    #: True when trying the SAME provider again could plausibly succeed
+    retryable = False
 
 
 class LLMRateLimited(LLMError):
+    category = "rate_limited"
+    retryable = True
+
     def __init__(self, msg: str, retry_after: float | None = None):
         super().__init__(msg)
         self.retry_after = retry_after
 
 
 class LLMUnavailable(LLMError):
-    """Transient: timeout, 5xx, connection error, model cold."""
+    """Transient server-side: 5xx, 529 overloaded, model cold."""
+
+    category = "temporarily_unavailable"
+    retryable = True
+
+
+class LLMTransport(LLMUnavailable):
+    """Client-side transport failure: timeout, DNS, connection reset."""
+
+    category = "transport_error"
+    retryable = True
+
+
+class LLMAuthError(LLMError):
+    """401 / 403 — the key is wrong or lacks access. Retrying is pointless."""
+
+    category = "authentication_error"
+    retryable = False
+
+
+class LLMConfigError(LLMError):
+    """Invalid workspace id, unknown model, malformed request (400/404). The
+    same request will fail identically on retry — move to the next provider and
+    cool this one down hard (V4 §7/§8)."""
+
+    category = "configuration_error"
+    retryable = False
 
 
 class LLMBadOutput(LLMError):
-    """Response was not valid JSON / not usable."""
+    """Response was not valid JSON / did not match the schema. Often prompt- or
+    truncation-specific, so a retry can help, but it is not a provider fault —
+    the circuit breaker is NOT tripped for this."""
+
+    category = "bad_output"
+    retryable = True
 
 
 @dataclass

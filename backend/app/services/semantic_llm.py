@@ -62,7 +62,10 @@ def derive_semantics(db: Session, person: Person) -> tuple[dict, str, str] | Non
     compact = build_compact_profile(db, person)
     user = _INSTRUCTIONS + json.dumps(compact, ensure_ascii=False, indent=2)
 
-    result = generate_structured(_SYSTEM, user, ProfileSemanticData, max_tokens=2200)
+    result = generate_structured(
+        _SYSTEM, user, ProfileSemanticData, max_tokens=2200,
+        operation="profile_semantic_enrichment",
+    )
     if result is None:
         return None
 

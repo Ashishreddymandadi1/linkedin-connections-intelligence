@@ -109,7 +109,10 @@ def _classify_batch(db: Session, missing: list[tuple[str, str | None, str | None
             '"is_technology_company": bool|null, "is_big_tech": bool|null, "is_startup": bool|null, '
             '"confidence": 0-1, "reason": "..."}]} — one entry per key, echoing the key exactly.'
         )
-        result = generate_structured(_SYSTEM, user, CompanyClassificationBatch, max_tokens=2000)
+        result = generate_structured(
+            _SYSTEM, user, CompanyClassificationBatch, max_tokens=2000,
+            operation="company_classification",
+        )
         by_key = {c[0]: c for c in chunk}
         if result is None:
             log.info("company classification unavailable for %d companies — left UNKNOWN", len(chunk))

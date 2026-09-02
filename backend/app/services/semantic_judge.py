@@ -90,7 +90,9 @@ def judge(
             'Return {"people":[{"person_id":"...","criteria":[{"criterion_id":"...","status":"true|false|unknown",'
             '"match_strength":0-1,"confidence":0-1,"reason":"...","evidence":["..."]}]}]}'
         )
-        result = generate_structured(_SYSTEM, user, JudgeBatch, max_tokens=2600)
+        result = generate_structured(
+            _SYSTEM, user, JudgeBatch, max_tokens=2600, operation="semantic_judge",
+        )
         if result is None:
             log.info("semantic judge unavailable — %d candidates left to deterministic scoring", len(chunk))
             break

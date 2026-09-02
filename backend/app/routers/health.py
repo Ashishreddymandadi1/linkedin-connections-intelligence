@@ -14,16 +14,37 @@ def health() -> dict:
         "environment": settings.environment,
         "use_fixtures": settings.use_fixtures,
         "apify_configured": bool(settings.apify_api_token),
+        "embedding_model": settings.embedding_model,
+        "llm": _llm_health(),
+        # legacy flat keys — kept for any existing dashboards
         "groq_configured": bool(settings.groq_api_key),
         "openrouter_configured": bool(settings.openrouter_api_key),
-        "paid_llm_enabled": settings.enable_paid_llm,
-        "anthropic_active": settings.enable_paid_llm and bool(settings.anthropic_api_key),
-        "llm_chain": [p.name for p in _chain_names()],
-        "embedding_model": settings.embedding_model,
+        "anthropic_active": bool(settings.anthropic_api_key),
     }
 
 
-def _chain_names():
+def _llm_health() -> dict:
+    """Configuration-only view of the provider chain (V4 §12). No live calls,
+    no secrets."""
+    from app.services.llm import circuit
     from app.services.llm.providers import default_chain
 
-    return [p for p in default_chain() if p.available()]
+    return {
+        "priority": [p.name for p in default_chain()],
+        "anthropic": {
+            "configured": bool(settings.anthropic_api_key),
+            "model": settings.anthropic_model if settings.anthropic_api_key else None,
+            "workspace_id_set": bool(settings.anthropic_workspace_id),
+        },
+        "groq": {
+            "configured": bool(settings.groq_api_key),
+            "primary_model": settings.groq_primary_model,
+            "fallback_model": settings.groq_fallback_model,
+        },
+        "openrouter": {
+            "configured": bool(settings.openrouter_api_key),
+            "model": settings.openrouter_model,
+        },
+        "deprecated_enable_paid_llm": settings.enable_paid_llm,
+        "circuit_breakers": circuit.snapshot(),
+    }

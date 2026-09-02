@@ -31,13 +31,20 @@ class Settings(BaseSettings):
     openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
     llm_max_retries: int = 2
 
-    # Paid provider — only used when ENABLE_PAID_LLM=true AND a key is set. This is
-    # an explicit opt-in; the app never reaches for a paid model on its own.
-    enable_paid_llm: bool = False
+    # Anthropic (V4 §1) — a CONFIGURED api key is itself the opt-in. When
+    # ANTHROPIC_API_KEY is non-empty, Anthropic is tried first, ahead of Groq.
     anthropic_api_key: str = ""
-    anthropic_workspace_id: str = ""  # required for identity-linked keys
+    anthropic_workspace_id: str = ""  # only needed for identity-linked keys
     anthropic_model: str = "claude-haiku-4-5-20251001"
-    anthropic_first: bool = True  # when enabled, try Anthropic before the free tier
+    #: DEPRECATED (V4 §1/§3) — kept so old .env files don't error. It no longer
+    #: gates Anthropic: key present == use it.
+    enable_paid_llm: bool = False
+    #: DEPRECATED (V4 §3) — Anthropic is always first when a key is configured.
+    anthropic_first: bool = True
+
+    # Provider circuit breaker (V4 §8) — process-local, never persisted.
+    llm_provider_cooldown_seconds: float = 90.0               # transient (429/5xx/transport)
+    anthropic_config_failure_cooldown_seconds: float = 900.0  # auth / bad workspace / bad model
 
     # ── Embeddings (local) ───────────────────────────────────
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
