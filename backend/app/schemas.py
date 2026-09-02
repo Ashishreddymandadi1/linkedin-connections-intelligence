@@ -445,6 +445,12 @@ class SearchResultItem(BaseModel):
     match_score: float
     data_confidence: int
     reason: str
+    #: V4 §22-25 — exact_match / possible_match / not_match (near-matches only)
+    qualification: str = "possible_match"
+    #: required criteria still uncertain (why this is possible_match not exact)
+    uncertain_criteria: list[str] = []
+    #: required criteria this person FAILS (near-match rows only)
+    unmet_criteria: list[str] = []
     matched_criteria: list[str] = []
     score_breakdown: list[ScoreComponent] = []
     evidence: list[EvidenceItem] = []
@@ -457,6 +463,12 @@ class ConnectionBucket(BaseModel):
     total_candidates: int
     returned: int
     results: list[SearchResultItem]
+    #: V4 §22-26
+    exact_match_count: int = 0
+    possible_match_count: int = 0
+    #: candidates that miss exactly one required criterion — clearly labelled,
+    #: never mixed into `results` (V4 §26)
+    near_matches: list[SearchResultItem] = []
 
 
 class ExternalBucket(BaseModel):

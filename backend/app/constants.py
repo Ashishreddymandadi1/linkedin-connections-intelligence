@@ -117,6 +117,21 @@ SEMANTIC_CRITERION_TYPES = {
 }
 
 
+class Qualification:
+    """Candidate-level match tier (V4 §22–§25). Ranked before match_score."""
+
+    EXACT_MATCH = "exact_match"      # every required criterion is TRUE
+    POSSIBLE_MATCH = "possible_match"  # no required FALSE, but a required semantic is UNKNOWN
+    NOT_MATCH = "not_match"          # a required criterion is confidently FALSE / unmet
+
+
+_QUALIFICATION_RANK = {
+    Qualification.EXACT_MATCH: 0,
+    Qualification.POSSIBLE_MATCH: 1,
+    Qualification.NOT_MATCH: 2,
+}
+
+
 class Operator:
     """How a criterion's ``values`` combine (spec §13)."""
 

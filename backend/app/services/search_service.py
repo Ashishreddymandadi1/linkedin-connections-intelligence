@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app import repositories as repo
 from app.config import settings
-from app.constants import CriterionType
+from app.constants import _QUALIFICATION_RANK, CriterionType, Qualification
 from app.models import SearchQuery
 from app.schemas import (
     ConnectionBucket,
@@ -25,6 +25,11 @@ from app.services.reason_generator import generate_reason
 from app.services.scoring import ScoredCandidate, ScoringContext, load_facts, score_candidate
 
 log = logging.getLogger("app.search")
+
+
+def _tier_key(s):
+    """Rank by qualification tier FIRST, then match score (V4 §25)."""
+    return (_QUALIFICATION_RANK.get(s.qualification, 1), -s.match_score)
 
 
 def run_connection_search(db: Session, *, dataset_id: str, query: str) -> SearchResponse:
@@ -60,16 +65,22 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
 
     # pass 1 — deterministic facts + assertion/company-class concepts + embedding relevance
     scored: list[ScoredCandidate] = []
+    near_pool: list[ScoredCandidate] = []
     for person in candidates:
         result = score_candidate(facts_by_id[person.id], parsed, ctx)
-        if result.excluded_reason or result.match_score < settings.min_match_score:
+        if result.qualification == Qualification.NOT_MATCH:
+            # a candidate that misses exactly ONE required criterion is a near-match
+            if len(result.unmet_required) == 1:
+                near_pool.append(result)
+            continue
+        if result.match_score < settings.min_match_score:
             continue
         scored.append(result)
-    scored.sort(key=lambda s: s.match_score, reverse=True)
+    scored.sort(key=_tier_key)
 
     # semantic judge — bounded, batched LLM pass for ambiguous concept criteria
     scored = _maybe_judge(db, query, parsed, scored, facts_by_id, candidates, ctx, llm_available)
-    scored.sort(key=lambda s: s.match_score, reverse=True)
+    scored.sort(key=_tier_key)
 
     # rerank pool — cross-encoder over the top RERANK_POOL, then re-score
     pool = scored[: settings.rerank_pool]
@@ -80,11 +91,15 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         for c, ce in zip(pool, cross_encode(query, texts)):
             ctx.reranker_scores[c.person.id] = ce
         rescored = [score_candidate(facts_by_id[c.person.id], parsed, ctx) for c in pool]
-        rescored = [r for r in rescored if not r.excluded_reason and r.match_score >= settings.min_match_score]
-        rescored.sort(key=lambda s: s.match_score, reverse=True)
+        rescored = [r for r in rescored
+                    if r.qualification != Qualification.NOT_MATCH and r.match_score >= settings.min_match_score]
+        rescored.sort(key=_tier_key)
         scored = rescored + scored[settings.rerank_pool :]
+        scored.sort(key=_tier_key)  # cross-encoder must NOT reorder across tiers (V4 §25)
 
     total_scored = len(scored)
+    exact_n = sum(1 for s in scored if s.qualification == Qualification.EXACT_MATCH)
+    possible_n = sum(1 for s in scored if s.qualification == Qualification.POSSIBLE_MATCH)
     top = scored[: settings.top_connections]
     top = _maybe_llm_rerank(db, query, top, facts_by_id, llm_available)
 
@@ -117,11 +132,20 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
             payload=item.model_dump(),
         )
 
+    near_pool.sort(key=lambda s: s.match_score, reverse=True)
+    near_items = [
+        _to_result_item(db, i, cand, parsed, query, use_llm_reason=False)
+        for i, cand in enumerate(near_pool[:5], start=1)
+    ]
+
     return SearchResponse(
         search_id=sq.id,
         query=query,
         interpreted_query=parsed.model_dump(),
-        connections=ConnectionBucket(total_candidates=total_scored, returned=len(results), results=results),
+        connections=ConnectionBucket(
+            total_candidates=total_scored, returned=len(results), results=results,
+            exact_match_count=exact_n, possible_match_count=possible_n, near_matches=near_items,
+        ),
         external=ExternalBucket(searched=False),
         llm_provider=provider,
         llm_model=model,
@@ -358,6 +382,9 @@ def _to_result_item(
         match_score=cand.match_score,
         data_confidence=p.profile_completeness,
         reason=reason,
+        qualification=cand.qualification,
+        uncertain_criteria=cand.uncertain_required,
+        unmet_criteria=cand.unmet_required,
         matched_criteria=cand.matched_criteria,
         score_breakdown=cand.components,
         evidence=cand.evidence,

@@ -28,7 +28,14 @@ from sqlalchemy.orm import Session
 
 from app import repositories as repo
 from app.config import settings
-from app.constants import CriterionType, Operator, Scope, SkillSource, TriState
+from app.constants import (
+    CriterionType,
+    Operator,
+    Qualification,
+    Scope,
+    SkillSource,
+    TriState,
+)
 from app.models import Person
 from app.schemas import EvidenceItem, ParsedSearchQuery, ScoreComponent, SearchCriterion
 from app.services import career_chronology as _career
@@ -45,7 +52,8 @@ from app.services.matching import (
     token_overlap,
 )
 
-_REQUIRED_MIN = 0.15
+_REQUIRED_MIN = 0.15   # below this a required non-semantic criterion is a hard miss
+_EXACT_MIN = 0.55      # a required non-semantic criterion counts as TRUE (exact) only above this
 _MATCHED_MIN = 0.2
 #: types evaluated as meaning (tri-state), never phrase matches (V4 §6/§29)
 _SEMANTIC_TYPES = {
@@ -94,6 +102,13 @@ class ScoredCandidate:
     evidence: list[EvidenceItem]
     matched_criteria: list[str] = field(default_factory=list)
     excluded_reason: str | None = None
+    #: V4 §22-25 — ranked BEFORE match_score. not_match candidates are kept out
+    #: of the normal results bucket (may surface as near-matches).
+    qualification: str = Qualification.POSSIBLE_MATCH
+    #: required criteria that were FALSE or unmet (for near-match explanations)
+    unmet_required: list[str] = field(default_factory=list)
+    #: required semantic criteria that are UNKNOWN (why this is only POSSIBLE)
+    uncertain_required: list[str] = field(default_factory=list)
 
 
 def load_facts(db: Session, person: Person, facts_cache: dict | None = None) -> ProfileFacts:
@@ -691,6 +706,9 @@ def score_candidate(
     rel_w = _effective_relevance_weight(parsed)
     scale = (100.0 - rel_w) / 100.0
 
+    unmet: list[str] = []          # required + confidently FALSE / below the fact bar
+    uncertain: list[str] = []      # required semantic + UNKNOWN
+
     for crit in parsed.criteria:
         strength, ev, status = _score_one(facts, crit, ctx)
         eff_weight = crit.weight * scale
@@ -703,17 +721,35 @@ def score_candidate(
 
         if crit.required:
             if crit.type in _SEMANTIC_TYPES:
-                # spec §15/§28, V4 §24/§E.6 — a CONFIDENT FALSE always excludes
-                # (negative evidence beats a weak similarity); UNKNOWN never does.
                 if status == TriState.FALSE:
-                    return _excluded(facts.person, components, crit)
+                    unmet.append(_label(crit))
+                elif status != TriState.TRUE:
+                    uncertain.append(_label(crit))
             elif strength < _REQUIRED_MIN:
-                return _excluded(facts.person, components, crit)
+                unmet.append(_label(crit))          # clear miss (e.g. wrong city)
+            elif strength < _EXACT_MIN:
+                unmet.append(_label(crit))          # partial (e.g. Director when CXO asked) -> near-match
 
         total += score
         if strength >= _MATCHED_MIN:
             matched.append(_label(crit))
             all_evidence.extend(ev)
+
+    # ── qualification tier (V4 §22-25) ────────────────────────────────
+    if unmet:
+        qualification = Qualification.NOT_MATCH
+    elif uncertain:
+        qualification = Qualification.POSSIBLE_MATCH
+    else:
+        qualification = Qualification.EXACT_MATCH
+
+    if qualification == Qualification.NOT_MATCH:
+        return ScoredCandidate(
+            person=facts.person, match_score=round(min(100.0, total), 1), components=components,
+            evidence=[], matched_criteria=matched,
+            excluded_reason=f"required criterion not met: {unmet[0]}",
+            qualification=qualification, unmet_required=unmet, uncertain_required=uncertain,
+        )
 
     if rel_w > 0:
         rc = _relevance_component(facts, ctx, rel_w)
@@ -725,13 +761,7 @@ def score_candidate(
     return ScoredCandidate(
         person=facts.person, match_score=round(min(100.0, total), 1), components=components,
         evidence=_dedupe_evidence(all_evidence), matched_criteria=matched,
-    )
-
-
-def _excluded(person: Person, components: list[ScoreComponent], crit: SearchCriterion) -> ScoredCandidate:
-    return ScoredCandidate(
-        person=person, match_score=0.0, components=components, evidence=[],
-        excluded_reason=f"required criterion not met: {crit.concept or crit.value}",
+        qualification=qualification, uncertain_required=uncertain,
     )
 
 

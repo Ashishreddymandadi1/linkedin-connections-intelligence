@@ -150,7 +150,9 @@ def test_required_criterion_excludes_non_match():
     p = _Person(current_company="Meta", current_title="SWE")
     scored = score_candidate(_facts(p, skills=[_Skill("Java")]), parsed)
     assert scored.excluded_reason is not None
-    assert scored.match_score == 0.0
+    # V4 §24-26: not_match, kept out of normal results (score retained for near-match ranking)
+    assert scored.qualification == "not_match"
+    assert "Currently at Google" in scored.unmet_required
 
 
 def test_inferred_skill_scores_below_explicit():
