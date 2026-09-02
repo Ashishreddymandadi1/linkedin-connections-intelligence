@@ -270,6 +270,21 @@ class CompanyClassificationBatch(BaseModel):
 # ─────────────────── validated LLM output: query ───────────────────
 
 
+#: unknown types the LLM sometimes emits, mapped to a real first-class type (V4 §6)
+_CRITERION_TYPE_ALIASES = {
+    "industry": "industry_experience", "sector": "industry_experience",
+    "industry_sector": "industry_experience", "employer_category": "company_category",
+    "employer_industry": "industry_experience",
+    "role": "role_function", "function": "role_function", "job_function": "role_function",
+    "profession": "role_function", "domain": "role_function",
+    "seniority_level": "seniority", "years_of_experience": "years_experience",
+    "tenure": "years_experience", "experience_years": "years_experience",
+    "transition": "career_transition", "career_change": "career_transition",
+    "concept": "professional_concept", "leadership": "professional_concept",
+    "mentorship": "professional_concept", "capability": "professional_concept",
+}
+
+
 class SearchCriterion(BaseModel):
     id: str
     type: str
@@ -290,15 +305,17 @@ class SearchCriterion(BaseModel):
     @field_validator("type")
     @classmethod
     def _known_type(cls, v: str) -> str:
-        v = v.strip().lower().replace(" ", "_")
-        if v not in ALL_CRITERION_TYPES:
-            # tolerate unknown types by folding to keyword rather than silently
-            # inventing behavior — but semantic-sounding unknowns fold to
-            # semantic_concept instead of a literal keyword search (spec §3/§25).
-            if any(h in v for h in ("industry", "sector", "category", "concept", "startup", "leader", "mentor")):
-                return "semantic_concept"
+        v = v.strip().lower().replace(" ", "_").replace("-", "_")
+        if v in ALL_CRITERION_TYPES:
+            return v
+        if v in _CRITERION_TYPE_ALIASES:
+            return _CRITERION_TYPE_ALIASES[v]
+        # NEVER silently fall to `keyword` (V4 §6). An unrecognised semantic-ish
+        # type is a professional_concept; only an explicit "keyword"/"text" type
+        # produces a literal text search.
+        if v in ("text", "phrase", "mention", "literal"):
             return "keyword"
-        return v
+        return "professional_concept"
 
     @field_validator("operator")
     @classmethod

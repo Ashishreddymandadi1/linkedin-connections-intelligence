@@ -88,13 +88,33 @@ class CriterionType:
     #: via CompanySemantic, not against literal text in their profile.
     COMPANY_CATEGORY = "company_category"
 
+    # ── V4 first-class professional types (V4 §6) ──────────────
+    #: "worked in tech" / "fintech experience" — the INDUSTRY of the person's
+    #: employers, evaluated from experience-level employer_industries + assertions.
+    INDUSTRY_EXPERIENCE = "industry_experience"
+    #: "software engineers" / "product managers" — the FUNCTION of the person's
+    #: role, independent of employer industry (V4 §11).
+    ROLE_FUNCTION = "role_function"
+    #: any other professional concept that is not literal text and not one of the
+    #: above (leadership, mentorship, "enterprise sales experience", …). The safe
+    #: landing type for an unrecognised semantic-ish type (never `keyword`).
+    PROFESSIONAL_CONCEPT = "professional_concept"
+    #: "moved from consulting to tech" — ordered from→to over the career (V4 §19).
+    CAREER_TRANSITION = "career_transition"
+    #: "10+ years of backend experience" — minimum duration in a domain (V4 §21).
+    YEARS_EXPERIENCE = "years_experience"
+
 
 ALL_CRITERION_TYPES = {
     v for k, v in vars(CriterionType).items() if not k.startswith("_") and isinstance(v, str)
 }
 
 #: criterion types that must be evaluated as semantic concepts, never phrase_matches
-SEMANTIC_CRITERION_TYPES = {CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY}
+SEMANTIC_CRITERION_TYPES = {
+    CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY,
+    CriterionType.INDUSTRY_EXPERIENCE, CriterionType.ROLE_FUNCTION,
+    CriterionType.PROFESSIONAL_CONCEPT, CriterionType.CAREER_TRANSITION,
+}
 
 
 class Operator:

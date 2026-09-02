@@ -46,7 +46,13 @@ from app.services.matching import (
 
 _REQUIRED_MIN = 0.15
 _MATCHED_MIN = 0.2
-_SEMANTIC_TYPES = {CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY}
+#: types evaluated as meaning (tri-state), never phrase matches (V4 §6/§29)
+_SEMANTIC_TYPES = {
+    CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY,
+    CriterionType.PROFESSIONAL_CONCEPT, CriterionType.INDUSTRY_EXPERIENCE,
+    CriterionType.ROLE_FUNCTION, CriterionType.CAREER_TRANSITION,
+    CriterionType.YEARS_EXPERIENCE,
+}
 
 
 @dataclass
@@ -463,6 +469,54 @@ def _score_semantic_concept(
     return round(best_strength, 3), best_ev, best_status
 
 
+def _score_semantic_multi(
+    facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
+) -> tuple[float, list[EvidenceItem], str]:
+    """Score a semantic criterion honouring ``values`` + ``operator`` (V4 §4).
+    Single value -> plain concept scoring. ANY_OF -> best value. ALL_OF -> all
+    values must hold (min). NOT -> invert best."""
+    vals = [v for v in (crit.values or ([crit.value] if crit.value else [])) if v]
+    # a rich free-text concept is scored whole; a short value list is scored per value
+    if crit.concept and len(vals) <= 1:
+        return _score_semantic_concept(facts, crit, ctx)
+    if len(vals) <= 1:
+        return _score_semantic_concept(facts, crit, ctx)
+
+    results = [_score_semantic_concept(facts, _synthetic_crit(v), ctx) for v in vals]
+    if crit.operator == Operator.NOT:
+        best = max(results, key=lambda r: r[0])
+        inv = 1.0 - best[0]
+        status = TriState.FALSE if best[2] == TriState.TRUE else (
+            TriState.TRUE if best[0] < _REQUIRED_MIN else TriState.UNKNOWN)
+        return round(inv, 3), [], status
+    if crit.operator == Operator.ALL_OF:
+        strength = min(r[0] for r in results)
+        if any(r[2] == TriState.FALSE for r in results):
+            status = TriState.FALSE
+        elif all(r[2] == TriState.TRUE for r in results):
+            status = TriState.TRUE
+        else:
+            status = TriState.UNKNOWN
+        ev = [e for r in results for e in r[1]][:4]
+        return round(strength, 3), ev, status
+    # ANY_OF
+    best = max(results, key=lambda r: r[0])
+    return best
+
+
+def _score_chronology(
+    facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
+) -> tuple[float, list[EvidenceItem], str]:
+    """career_transition / years_experience — real implementation in PART D
+    (career_chronology). Until then these stay UNKNOWN so a required transition
+    criterion yields POSSIBLE_MATCH, never a false EXACT_MATCH or exclusion."""
+    from app.services.career_chronology import score_transition, score_years_experience
+
+    if crit.type == CriterionType.CAREER_TRANSITION:
+        return score_transition(facts, crit)
+    return score_years_experience(facts, crit)
+
+
 # ─────────────────────── dispatch ───────────────────────
 
 _STRATEGIES = {
@@ -497,10 +551,13 @@ def _score_one(
                 jr.get("status"),
             )
 
-        if crit.type == CriterionType.SEMANTIC_CONCEPT:
-            return _score_semantic_concept(facts, crit, ctx)
+        if crit.type in (CriterionType.SEMANTIC_CONCEPT, CriterionType.PROFESSIONAL_CONCEPT,
+                         CriterionType.INDUSTRY_EXPERIENCE, CriterionType.ROLE_FUNCTION):
+            return _score_semantic_multi(facts, crit, ctx)
         if crit.type == CriterionType.COMPANY_CATEGORY:
             return _score_company_category(facts, crit, ctx)
+        if crit.type in (CriterionType.CAREER_TRANSITION, CriterionType.YEARS_EXPERIENCE):
+            return _score_chronology(facts, crit, ctx)
 
         if crit.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY):
             want = crit.type == CriterionType.CURRENT_COMPANY

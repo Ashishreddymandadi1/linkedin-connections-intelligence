@@ -130,8 +130,29 @@ def _clean_company(s: str) -> str:
     return s
 
 
-def _split_or(blob: str) -> list[str]:
-    return [p.strip(" .,") for p in re.split(r"\s*,\s*(?:or\s+)?|\s+or\s+|\s+and\s+", blob) if p.strip(" .,")]
+#: split points that DON'T tell us the connective (comma) vs. ones that DO
+_SPLIT_RE = re.compile(r"\s*,\s*|\s+or\s+|\s+and\s+|\s*&\s*|\s*\+\s*|\s+as well as\s+", re.I)
+_AND_RE = re.compile(r"\s+and\s+|\s*&\s*|\s*\+\s*|\s+as well as\s+|\bboth\b", re.I)
+_OR_RE = re.compile(r"\s+or\s+|\beither\b", re.I)
+
+
+def parse_value_group(blob: str) -> tuple[list[str], str]:
+    """Split a value list AND report the Boolean connective (V4 §3/§4).
+
+    "Google or Meta"          -> (["Google","Meta"], ANY_OF)
+    "Amazon and Microsoft"    -> (["Amazon","Microsoft"], ALL_OF)
+    "Amazon, Microsoft"       -> (["Amazon","Microsoft"], ANY_OF)   # comma = OR by default
+    """
+    blob = blob.strip(" .,")
+    values = [p.strip(" .,") for p in _SPLIT_RE.split(blob) if p.strip(" .,")]
+    has_and = bool(_AND_RE.search(f" {blob} "))
+    has_or = bool(_OR_RE.search(f" {blob} "))
+    operator = Operator.ALL_OF if (has_and and not has_or) else Operator.ANY_OF
+    return values, operator
+
+
+def _split_or(blob: str) -> list[str]:  # kept for callers that only want the values
+    return parse_value_group(blob)[0]
 
 
 @dataclass
@@ -183,43 +204,138 @@ def extract_facts(query: str, *, context: dict[str, str] | None = None) -> FactS
         blob = _clean_company(m.group(1))
         if not blob:
             continue
-        names = [n for n in _split_or(blob) if n.lower() not in _NOT_A_COMPANY]
+        vals, op = parse_value_group(blob)
+        names = [n for n in vals if n.lower() not in _NOT_A_COMPANY]
         if not names or any(n.lower() in fs.consumed for n in names):
             continue
         fs.criteria.append(SearchCriterion(
             id=f"past_{_slug(names[0])}", type=CriterionType.PAST_COMPANY,
-            values=names, operator=Operator.ANY_OF, scope=Scope.PAST_COMPANY,
+            values=names, operator=op, scope=Scope.PAST_COMPANY,
             weight=35, required=True,
         ))
         fs.consumed.update(n.lower() for n in names)
 
     for m in _CURRENT_RE.finditer(q):
         blob = _clean_company(m.group(1))
-        names = [n for n in _split_or(blob) if n.lower() not in _NOT_A_COMPANY]
+        vals, op = parse_value_group(blob)
+        names = [n for n in vals if n.lower() not in _NOT_A_COMPANY]
         if not names or any(n.lower() in fs.consumed for n in names):
             continue
         fs.criteria.append(SearchCriterion(
             id=f"cur_{_slug(names[0])}", type=CriterionType.CURRENT_COMPANY,
-            values=names, operator=Operator.ANY_OF, scope=Scope.CURRENT_COMPANY,
+            values=names, operator=op, scope=Scope.CURRENT_COMPANY,
             weight=35, required=True,
         ))
         fs.consumed.update(n.lower() for n in names)
 
-    last_n = _LAST_N_RE.search(q)
-    if last_n:
-        fs.notes.append(f"recency window: last {last_n.group(1)} years")
-    else:
-        ym = _YEARS_RE.search(q)
-        if ym and "year" in q.lower():
-            n = int(ym.group(1))
+    # "people with Amazon and Microsoft experience" — no former/current cue, but
+    # an explicit conjunction of company names before "experience"
+    exp_m = _COMPANY_EXPERIENCE_RE.search(q)
+    if exp_m and not fs.has_type(CriterionType.PAST_COMPANY, CriterionType.CURRENT_COMPANY):
+        vals, op = parse_value_group(exp_m.group(1))
+        names = [n for n in vals if _looks_like_company(n)]
+        if len(names) >= 1 and not any(n.lower() in fs.consumed for n in names):
             fs.criteria.append(SearchCriterion(
-                id="years_exp", type=CriterionType.SEMANTIC_CONCEPT,
-                concept=f"at least {n} years of professional experience",
-                scope=Scope.CAREER, weight=15, required=False,
+                id=f"exp_{_slug(names[0])}", type=CriterionType.PAST_COMPANY,
+                values=names, operator=op, scope=Scope.ANY_EXPERIENCE,
+                weight=35, required=True,
             ))
+            fs.consumed.update(n.lower() for n in names)
+
+    _extract_semantic_boolean(q, fs)
+    _extract_years_experience(q, fs)
+    _extract_transition(q, fs)
 
     fs.criteria = [c for c in fs.criteria if (c.concept or c.value or "").lower() not in ctx_words]
     return fs
+
+
+#: "moved from consulting to tech" / "left big tech for startups" /
+#: "former researchers now in industry" / "engineers who moved into product"
+_TRANSITION_RES = (
+    re.compile(r"\b(?:moved|transitioned|switched|shifted|pivoted|went)\s+(?:from\s+)?"
+               r"(.+?)\s+(?:to|into)\s+(.+?)(?:\s*$|[,.])", re.I),
+    re.compile(r"\bleft\s+(.+?)\s+for\s+(.+?)(?:\s*$|[,.])", re.I),
+    re.compile(r"\bformer\s+(.+?)\s+(?:now|currently|later)\s+(?:working\s+)?"
+               r"(?:in|at|as|joined)\s+(.+?)(?:\s*$|[,.])", re.I),
+)
+_TRANSITION_STOP = re.compile(r"\b(people|person|someone|who|that|which|those|profiles?)\b", re.I)
+
+
+def _extract_transition(q: str, fs: FactSet) -> None:
+    for rx in _TRANSITION_RES:
+        m = rx.search(q)
+        if not m:
+            continue
+        frm = _TRANSITION_STOP.sub("", m.group(1)).strip(" .,")
+        to = _TRANSITION_STOP.sub("", m.group(2)).strip(" .,")
+        # normalise a couple of very common shorthands
+        to = re.sub(r"\btech\b", "technology", to, flags=re.I)
+        frm = re.sub(r"\btech\b", "technology", frm, flags=re.I)
+        if len(frm) < 2 or len(to) < 2:
+            continue
+        fs.criteria.append(SearchCriterion(
+            id="transition", type=CriterionType.CAREER_TRANSITION,
+            concept=f"from {frm} to {to}", scope=Scope.CAREER, weight=45, required=True,
+        ))
+        fs.notes.append(f"career transition: {frm} -> {to}")
+        return
+
+
+# "X and Y experience" / "X, Y and Z experience"
+_COMPANY_EXPERIENCE_RE = re.compile(
+    r"\b(?:with\s+)?([A-Z][\w&.\-]*(?:\s+(?:and|or|&|,)\s*[A-Z][\w&.\-]*)+)\s+experience\b"
+)
+#: "security or cloud experts", "AI and security leaders", "sales and marketing pros"
+_SEM_BOOL_RE = re.compile(
+    r"\b([a-z][\w/ +.-]*?)\s+(and|or)\s+([a-z][\w/ +.-]*?)\s+"
+    r"(experts?|specialists?|leaders?|professionals?|engineers?|managers?|people|pros|executives?|"
+    r"backgrounds?|experience|skills?|expertise)\b",
+    re.I,
+)
+_ROLE_NOUNS = {"engineer", "engineers", "manager", "managers", "developer", "developers"}
+
+
+def _extract_semantic_boolean(q: str, fs: FactSet) -> None:
+    m = _SEM_BOOL_RE.search(q)
+    if not m:
+        return
+    a, conn, b, noun = m.group(1).strip(), m.group(2).lower(), m.group(3).strip(), m.group(4).lower()
+    vals = [v for v in (a, b) if v and len(v) > 1]
+    if len(vals) < 2:
+        return
+    if any(v.lower() in fs.consumed for v in vals):
+        return
+    op = Operator.ALL_OF if conn == "and" else Operator.ANY_OF
+    ctype = CriterionType.ROLE_FUNCTION if noun in _ROLE_NOUNS else CriterionType.PROFESSIONAL_CONCEPT
+    fs.criteria.append(SearchCriterion(
+        id=f"sem_{_slug(vals[0])}", type=ctype, values=vals, operator=op,
+        concept=f"{(' and ' if op == Operator.ALL_OF else ' or ').join(vals)} ({noun})",
+        scope=Scope.CAREER, weight=30, required=False,
+    ))
+    fs.consumed.update(v.lower() for v in vals)
+
+
+def _extract_years_experience(q: str, fs: FactSet) -> None:
+    ym = _YEARS_RE.search(q)
+    if not ym or "year" not in q.lower() or _LAST_N_RE.search(q):
+        if _LAST_N_RE.search(q):
+            fs.notes.append(f"recency window: last {_LAST_N_RE.search(q).group(1)} years")
+        return
+    n = int(ym.group(1))
+    # optional trailing domain: "10+ years of backend experience"
+    dom_m = re.search(rf"{re.escape(ym.group(0))}\s+(?:of\s+)?([a-z][\w /-]{{2,40}}?)\s*(?:experience|exp\b|$)", q, re.I)
+    domain = (dom_m.group(1).strip() if dom_m else "").strip(" .,")
+    fs.criteria.append(SearchCriterion(
+        id="years_exp", type=CriterionType.YEARS_EXPERIENCE,
+        value=str(n), concept=f"at least {n} years" + (f" in {domain}" if domain else ""),
+        scope=Scope.CAREER, weight=20, required=True,
+    ))
+
+
+def _looks_like_company(s: str) -> bool:
+    return bool(re.match(r"^[A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*)?$", s.strip())) \
+        and s.strip().lower() not in _NOT_A_COMPANY
 
 
 def _looks_like_place(s: str) -> bool:
@@ -244,8 +360,19 @@ def _values_of(c: SearchCriterion) -> set[str]:
     return {v.strip().lower() for v in vs if v.strip()}
 
 
+_SEMANTIC_FAMILY = {
+    CriterionType.SEMANTIC_CONCEPT, CriterionType.PROFESSIONAL_CONCEPT,
+    CriterionType.ROLE_FUNCTION, CriterionType.INDUSTRY_EXPERIENCE,
+}
+
+
 def _same_fact(a: SearchCriterion, b: SearchCriterion) -> bool:
-    if a.type != b.type and {a.type, b.type} != {CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY}:
+    same_family = (
+        a.type == b.type
+        or {a.type, b.type} <= {CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY}
+        or {a.type, b.type} <= _SEMANTIC_FAMILY
+    )
+    if not same_family:
         return False
     return bool(_values_of(a) & _values_of(b))
 
@@ -260,16 +387,26 @@ def merge_into_plan(plan: ParsedSearchQuery, facts: FactSet, *, context: dict[st
     ctx_words = context_terms(context)
 
     fact_values = {v for f in facts.criteria for v in _values_of(f)} | facts.consumed
+    #: words already covered by a structured transition / years / boolean fact
+    structured_words: set[str] = set()
+    for f in facts.criteria:
+        if f.type in (CriterionType.CAREER_TRANSITION, CriterionType.YEARS_EXPERIENCE,
+                      CriterionType.PROFESSIONAL_CONCEPT, CriterionType.ROLE_FUNCTION):
+            structured_words.update(re.findall(r"[a-z][a-z+.#-]{2,}", (f.concept or "").lower()))
+    structured_words -= {"least", "years", "professional", "career"}
+
     kept: list[SearchCriterion] = []
     for c in crits:
         cv = (c.value or c.concept or "").lower()
         if c.type in (CriterionType.SKILL, CriterionType.KEYWORD) and cv in ctx_words:
             issues.append(f"dropped context word '{c.value}' parsed as a {c.type}")
             continue
-        # a weak one-word concept/keyword that just restates a hard fact is noise
-        if c.type in (CriterionType.SKILL, CriterionType.KEYWORD, CriterionType.SEMANTIC_CONCEPT) \
-                and cv in fact_values and len(cv.split()) <= 2 and not c.required:
+        weak = c.type in (CriterionType.SKILL, CriterionType.KEYWORD, CriterionType.SEMANTIC_CONCEPT) and not c.required
+        if weak and cv in fact_values and len(cv.split()) <= 2:
             issues.append(f"dropped redundant {c.type} '{cv}' (already a hard fact)")
+            continue
+        if weak and len(cv.split()) == 1 and cv in structured_words:
+            issues.append(f"dropped redundant {c.type} '{cv}' (covered by a structured criterion)")
             continue
         kept.append(c)
     crits = kept
@@ -292,9 +429,11 @@ def merge_into_plan(plan: ParsedSearchQuery, facts: FactSet, *, context: dict[st
             issues.append(f"fixed scope of {sorted(_values_of(match))}: {match.scope} -> {f.scope}")
             match.scope = f.scope
             match.type = f.type
-        if f.operator == Operator.ANY_OF and match.operator == Operator.ALL_OF and len(_values_of(f)) > 1:
-            issues.append(f"restored ANY_OF for {sorted(_values_of(match))} (plan had ALL_OF)")
-            match.operator = Operator.ANY_OF
+        # the deterministic connective is authoritative when the query was explicit
+        if f.operator in (Operator.ANY_OF, Operator.ALL_OF) and len(_values_of(f)) > 1 \
+                and match.operator != f.operator:
+            issues.append(f"set operator of {sorted(_values_of(match))}: {match.operator} -> {f.operator}")
+            match.operator = f.operator
         if f.operator == Operator.NOT and match.operator != Operator.NOT:
             issues.append(f"restored NOT for {sorted(_values_of(match))}")
             match.operator = Operator.NOT
@@ -308,18 +447,39 @@ def merge_into_plan(plan: ParsedSearchQuery, facts: FactSet, *, context: dict[st
 
 
 def validate_and_repair(plan: ParsedSearchQuery, query: str, facts: FactSet, *, context: dict[str, str]) -> tuple[ParsedSearchQuery, list[str]]:
-    """Final safety net (V4 §17)."""
+    """Final safety net (V4 §17). Repairs when it can, only warns when it can't;
+    an unrepairable Boolean mismatch lowers interpretation_confidence."""
     plan, issues = merge_into_plan(plan, facts, context=context)
-
     ql = query.lower()
-    if re.search(r"\b\w+\s+or\s+\w+", ql) and not any(
+    unrepaired = False
+
+    if re.search(r"\b[\w/-]+\s+or\s+[\w/-]+", ql) and not any(
         c.operator == Operator.ANY_OF and len(_values_of(c)) > 1 for c in plan.criteria
     ):
-        issues.append("query contains 'or' but no OR criterion was produced")
+        # try a deterministic reconstruction from the raw "X or Y <noun>" shape
+        m = _SEM_BOOL_RE.search(query)
+        if m and m.group(2).lower() == "or":
+            fs2 = FactSet()
+            _extract_semantic_boolean(query, fs2)
+            if fs2.criteria:
+                plan.criteria.append(fs2.criteria[0])
+                _renorm(plan)
+                issues.append(f"reconstructed semantic ANY_OF for {fs2.criteria[0].values}")
+            else:
+                unrepaired = True
+        else:
+            unrepaired = True
+        if unrepaired:
+            issues.append("query contains 'or' but no OR criterion could be produced")
+
     if re.search(r"\bnot\b|\bnever\b|\bexcept\b|\bexcluding\b", ql) and not any(
         c.operator == Operator.NOT for c in plan.criteria
     ):
         issues.append("query contains a negation but no NOT criterion was produced")
+        unrepaired = True
+
+    if unrepaired:
+        plan.interpretation_confidence = round(min(plan.interpretation_confidence, 0.5), 2)
     return plan, issues
 
 

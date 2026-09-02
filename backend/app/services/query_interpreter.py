@@ -72,8 +72,21 @@ _SYSTEM = (
     "'consulting'), scope: current_company or past_company or any_experience depending on the "
     "query ('now at a startup' -> scope current_company; 'ex-big-tech' -> scope past_company). "
     "NEVER emit current_company with value 'startup' or 'FAANG' - those are not company names.\n"
-    "  - 'engineering leader' / 'mentor' / 'advisor' / 'coach' -> type: semantic_concept, "
-    "category-like concept ('engineering leadership', 'mentors other engineers'), scope: career.\n"
+    "  - 'engineering leader' / 'mentor' / 'advisor' / 'coach' -> type: professional_concept, "
+    "concept ('engineering leadership', 'mentors other engineers'), scope: career.\n"
+    "  - 'software engineers' / 'ML engineers' / 'product managers' / 'data scientists' -> type: "
+    "role_function, concept: the canonical function ('software engineering'), scope: career. This is "
+    "the FUNCTION of the role, independent of the employer's industry.\n"
+    "  - 'worked in tech' / 'fintech experience' -> type: industry_experience (the employers' "
+    "INDUSTRY), NOT role_function.\n"
+    "  - 'moved from consulting to tech' / 'left big tech for startups' -> type: career_transition, "
+    "concept: 'from <A> to <B>'. '10+ years of backend experience' -> type: years_experience, "
+    "value: '10', concept: 'at least 10 years in backend engineering'.\n"
+    "  - AND vs OR: 'Google or Meta' -> operator ANY_OF; 'Amazon and Microsoft experience' (both) "
+    "-> operator ALL_OF. This applies to semantic concepts too: 'security or cloud experts' -> "
+    "role_function/professional_concept values [security, cloud] ANY_OF.\n"
+    "  - NEVER emit type 'keyword' unless the user literally asks for text matching ('profiles "
+    "mentioning Kubernetes'). An unusual concept is 'professional_concept', never 'keyword'.\n"
     "  - seniority words (CXO, senior, staff, director, VP, founder) -> type: seniority, value: the "
     "word. 'CXO' covers CEO/CTO/CFO/COO/CMO/CPO/Chief-anything - do not require the literal word "
     "'CXO' on the profile.\n\n"
@@ -164,28 +177,69 @@ _SUBJECT_RE = re.compile(
 )
 _SUBJECT_TYPES = {
     CriterionType.SENIORITY, CriterionType.TITLE, CriterionType.SEMANTIC_CONCEPT,
+    CriterionType.ROLE_FUNCTION, CriterionType.INDUSTRY_EXPERIENCE,
 }
 
 
 _CXO_WORDS_RE = re.compile(r"\b(cxo|ceo|cto|cfo|coo|cmo|cpo|ciso|cio|chief|executive)s?\b", re.I)
+#: "<subject> at fintech companies" / "in financial services" -> the employer
+#: constraint is part of the subject, so it is required too (V4 §7).
+_SUBJECT_EMPLOYER_RE = re.compile(
+    r"\b(?:at|in|for|with)\s+(?:a\s+|an\s+)?[\w /-]*?\b"
+    r"(fintech|consulting|healthcare|biotech|banking|financial services|"
+    r"insurance|retail|manufacturing|enterprise software|big tech|startups?)\b",
+    re.I,
+)
+
+
+#: query opens with (fillers) then a professional-role phrase
+_ROLE_SUBJECT_RE = re.compile(
+    r"^\s*(?:the\s+|find\s+|list\s+|show\s+(?:me\s+)?|people\s+(?:who\s+are\s+)?|"
+    r"senior\s+|staff\s+|lead\s+|principal\s+|former\s+|ex[- ]|top\s+)*"
+    r"(software engineers?|ml engineers?|machine learning engineers?|data scientists?|"
+    r"data engineers?|security engineers?|backend engineers?|frontend engineers?|"
+    r"product managers?|engineering managers?|sales leaders?|designers?|researchers?|"
+    r"engineers?|developers?|scientists?|managers?|consultants?|analysts?)\b",
+    re.I,
+)
 
 
 def _promote_subject(parsed: ParsedSearchQuery, query: str) -> None:
-    # a seniority word in the query's SUBJECT or in the event PURPOSE is a filter
-    subject = _SUBJECT_RE.match(query)
+    # a seniority/role word in the query's SUBJECT or event PURPOSE is a filter
+    subject = _SUBJECT_RE.match(query) or _ROLE_SUBJECT_RE.match(query)
     purpose = parsed.context.get("purpose", "")
     cxo_context = bool(_CXO_WORDS_RE.search(purpose))
-    if not subject and not cxo_context:
-        return
-    word = subject.group(1).rstrip("s").lower() if subject else ""
-    for c in parsed.criteria:
-        text = f"{c.value} {c.concept} {' '.join(c.values)}".lower()
-        if c.type == CriterionType.SENIORITY and (cxo_context or subject):
-            c.required = True
-            return
-        if c.type in _SUBJECT_TYPES and word and word in text:
-            c.required = True
-            return
+    promoted = False
+    if subject or cxo_context:
+        word = subject.group(1).rstrip("s").lower() if subject else ""
+        for c in parsed.criteria:
+            text = f"{c.value} {c.concept} {' '.join(c.values)}".lower()
+            if c.type == CriterionType.SENIORITY and (cxo_context or subject):
+                c.required = True
+                promoted = True
+                break
+            if c.type in _SUBJECT_TYPES and word and (word in text or c.type == CriterionType.ROLE_FUNCTION):
+                c.required = True
+                promoted = True
+                break
+        # a role_function anywhere counts as the subject even if the sentence
+        # starts with a filler ("people who are software engineers ...")
+        if not promoted:
+            for c in parsed.criteria:
+                if c.type == CriterionType.ROLE_FUNCTION:
+                    c.required = True
+                    promoted = True
+                    break
+
+    # "<role> at fintech companies" -> the employer category is required too
+    emp = _SUBJECT_EMPLOYER_RE.search(query)
+    if emp and (promoted or any(c.type == CriterionType.ROLE_FUNCTION for c in parsed.criteria)):
+        cat = emp.group(1).lower().rstrip("s")
+        for c in parsed.criteria:
+            if c.type in (CriterionType.COMPANY_CATEGORY, CriterionType.INDUSTRY_EXPERIENCE) \
+                    and cat in (c.concept or c.value or "").lower():
+                c.required = True
+                return
 
 
 def _finalize(parsed: ParsedSearchQuery, query: str, issues: list[str]) -> None:
@@ -215,6 +269,24 @@ _LOCATION_OR_RE = re.compile(
 _COMPANY_CATEGORY_WORDS = {
     "startup": "startup", "startups": "startup",
     "big tech": "big tech", "faang": "big tech", "big technology": "big tech",
+    "fintech": "fintech", "consulting firm": "consulting", "consultancy": "consulting",
+    "consulting firms": "consulting", "big four": "consulting", "big 4": "consulting",
+    "healthcare company": "healthcare", "biotech": "biotech", "enterprise software": "enterprise software",
+}
+
+#: query words that name a professional ROLE FUNCTION (meaning, not exact title).
+#: The value is the canonical role phrase used as the criterion concept.
+_ROLE_FUNCTION_WORDS = {
+    "software engineer": "software engineering", "software engineers": "software engineering",
+    "swe": "software engineering", "backend engineer": "backend engineering",
+    "frontend engineer": "frontend engineering", "full stack engineer": "full-stack engineering",
+    "ml engineer": "machine learning engineering", "machine learning engineer": "machine learning engineering",
+    "data scientist": "data science", "data scientists": "data science",
+    "data engineer": "data engineering", "security engineer": "security engineering",
+    "product manager": "product management", "product managers": "product management",
+    "sales leader": "sales leadership", "sales leaders": "sales leadership",
+    "engineering manager": "engineering management", "engineering leader": "engineering leadership",
+    "designer": "design", "designers": "design", "researcher": "research", "researchers": "research",
 }
 
 
@@ -246,16 +318,21 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
             )
             used_spans.extend(p.lower() for p in places)
 
+    from app.services.query_facts import parse_value_group
+
     for m in re.finditer(
         r"(?i:previously|formerly|former|ex[- ])\s*(?i:worked\s+(?:at|for)\s+)?"
-        r"([A-Z][\w&.\-]*(?:\s+(?:[A-Z][\w&.\-]*|of|and|&))*)",
+        r"([A-Z][\w&.\-]*(?:\s+(?:[A-Z][\w&.\-]*|of|and|or|&))*)",
         q,
     ):
-        name = _clean_name(m.group(1))
-        name = re.sub(r"\s+(?:of|and|&)$", "", name).strip()
-        if name and name.lower() not in _COMPANY_CATEGORY_WORDS:
-            crits.append(SearchCriterion(id=f"past_{_slug(name)}", type=CriterionType.PAST_COMPANY, value=name, weight=30, required=False, scope=Scope.PAST_COMPANY))
-            used_spans.append(name.lower())
+        blob = re.sub(r"\s+(?:of|and|or|&)$", "", _clean_name(m.group(1))).strip()
+        names, op = parse_value_group(blob)
+        names = [n for n in names if n and n.lower() not in _COMPANY_CATEGORY_WORDS]
+        if names:
+            crits.append(SearchCriterion(id=f"past_{_slug(names[0])}", type=CriterionType.PAST_COMPANY,
+                                         values=names, operator=op, weight=30, required=False,
+                                         scope=Scope.PAST_COMPANY))
+            used_spans.extend(n.lower() for n in names)
 
     for m in _CURRENT_RE.finditer(q):
         tail = q[m.end():]
@@ -302,9 +379,14 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
     if not any(c.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY) for c in crits):
         for m in _AT_RE.finditer(q + " "):
             name = _clean_name(m.group(1))
-            if name and name.lower() not in used_spans and name.lower() not in _KNOWN_SKILLS:
+            nl = name.lower()
+            # "at fintech companies" / "at a consulting firm" -> category, handled
+            # elsewhere; never a company literally named "fintech companies"
+            if re.search(r"\b(compan(?:y|ies)|firms?)\b", nl) or any(w in nl for w in _COMPANY_CATEGORY_WORDS):
+                continue
+            if name and nl not in used_spans and nl not in _KNOWN_SKILLS:
                 crits.append(SearchCriterion(id=f"co_{_slug(name)}", type=CriterionType.CURRENT_COMPANY, value=name, weight=30, required=False))
-                used_spans.append(name.lower())
+                used_spans.append(nl)
 
     for skill in sorted(_KNOWN_SKILLS, key=lambda s: -len(s)):
         if re.search(rf"\b{re.escape(skill)}\b", ql):
@@ -327,8 +409,19 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
 
     _company_words = {w for c in crits if c.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY)
                       for w in (c.values or [c.value]) for w in w.lower().split()}
+    #: a recognised role phrase -> role_function (meaning), else generic title
+    _seen_roles: set[str] = set()
+    for phrase, canon in sorted(_ROLE_FUNCTION_WORDS.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"\b{re.escape(phrase)}\b", ql) and canon not in _seen_roles:
+            if phrase.split()[0] in _company_words:
+                continue
+            _seen_roles.add(canon)
+            crits.append(SearchCriterion(id=f"role_{_slug(canon)}", type=CriterionType.ROLE_FUNCTION,
+                                         concept=canon, scope=Scope.CAREER, weight=25, required=False))
     for m in re.finditer(r"\b([a-z]+)\s+(engineer|engineers|developer|developers|manager|managers|scientist|scientists|designer|designers|architect|architects)\b", ql):
-        if m.group(1) in _company_words:  # "Meta engineers" -> Meta is the employer, not a title
+        if m.group(1) in _company_words or f"{m.group(1)} {m.group(2)}".rstrip("s") in _ROLE_FUNCTION_WORDS:
+            continue
+        if any(m.group(1) in (c.concept or "") for c in crits if c.type == CriterionType.ROLE_FUNCTION):
             continue
         title = f"{m.group(1)} {m.group(2)}".rstrip("s")
         crits.append(SearchCriterion(id=f"title_{_slug(title)}", type=CriterionType.TITLE, value=title, weight=20, required=False))
@@ -351,6 +444,8 @@ _STOP = {
     "previously", "worked", "works", "both", "someone", "find", "list", "give", "me",
     "moved", "move", "from", "now", "then", "later", "into", "invite", "recommend",
     "cxo", "cxos", "ceo", "cto", "cfo", "coo", "executive", "executives",
+    "experience", "experiences", "expertise", "background", "backgrounds", "skills",
+    "years", "year", "focused", "working",
 }
 
 

@@ -133,3 +133,67 @@ def test_extract_facts_scopes_former_vs_current():
     cur = [c for c in fs.criteria if c.type == CriterionType.CURRENT_COMPANY]
     assert past and "amazon" in _vals(past[0])
     assert cur and "google" in _vals(cur[0])
+
+
+# ─────────────────────── B.5 — AND vs OR (V4 §3/§8/§34) ───────────────────────
+
+
+def test_google_or_meta_is_any_of():
+    past = _by_type(_plan("former Google or Meta engineers"), CriterionType.PAST_COMPANY)[0]
+    assert _vals(past) == {"google", "meta"} and past.operator == Operator.ANY_OF and past.required
+
+
+def test_amazon_and_microsoft_is_all_of():
+    past = _by_type(_plan("people with Amazon and Microsoft experience"), CriterionType.PAST_COMPANY)[0]
+    assert _vals(past) == {"amazon", "microsoft"} and past.operator == Operator.ALL_OF and past.required
+
+
+def test_security_or_cloud_is_semantic_any_of():
+    plan = _plan("security or cloud experts")
+    sem = [c for c in plan.criteria if c.type in (CriterionType.PROFESSIONAL_CONCEPT, CriterionType.ROLE_FUNCTION)]
+    assert sem and sem[0].operator == Operator.ANY_OF
+    assert {"security", "cloud"} <= _vals(sem[0])
+    assert not any(c.type == CriterionType.KEYWORD for c in plan.criteria)
+
+
+def test_ai_and_security_is_semantic_all_of():
+    plan = _plan("AI and security leaders")
+    sem = [c for c in plan.criteria if c.type in (CriterionType.PROFESSIONAL_CONCEPT, CriterionType.ROLE_FUNCTION)]
+    assert sem and sem[0].operator == Operator.ALL_OF
+    assert {"ai", "security"} <= _vals(sem[0])
+
+
+def test_not_currently_at_amazon_is_not_operator():
+    nots = [c for c in _plan("engineers not currently at Amazon").criteria if c.operator == Operator.NOT]
+    assert nots and "amazon" in _vals(nots[0]) and nots[0].required
+
+
+# ─────────────────────── B.5 — role requiredness (V4 §7/§34) ───────────────────────
+
+
+def test_software_engineers_at_fintech_both_required():
+    plan = _plan("software engineers at fintech companies")
+    role = [c for c in plan.criteria if c.type == CriterionType.ROLE_FUNCTION]
+    fin = [c for c in plan.criteria if c.type in (CriterionType.COMPANY_CATEGORY, CriterionType.INDUSTRY_EXPERIENCE)
+           and "fintech" in (c.concept or c.value or "").lower()]
+    assert role and role[0].required, "role_function must be required without a 'must' word"
+    assert fin and fin[0].required, "fintech employer must be required"
+    assert not any(c.type == CriterionType.KEYWORD for c in plan.criteria)
+
+
+def test_role_becomes_role_function_not_generic_title():
+    plan = _plan("data scientists in Nashville")
+    assert any(c.type == CriterionType.ROLE_FUNCTION for c in plan.criteria)
+
+
+# ─────────────────────── B.5 — transition + years (deterministic emit) ───────────────────────
+
+
+def test_moved_from_consulting_to_tech_emits_transition():
+    tr = _by_type(_plan("people who moved from consulting to tech"), CriterionType.CAREER_TRANSITION)
+    assert tr and tr[0].required and "consulting" in tr[0].concept.lower()
+
+
+def test_ten_plus_years_backend_emits_years_experience():
+    ye = _by_type(_plan("people with 10+ years of backend experience"), CriterionType.YEARS_EXPERIENCE)
+    assert ye and ye[0].required and "10" in (ye[0].value + ye[0].concept)
