@@ -120,7 +120,7 @@ def score_transition(facts, crit: SearchCriterion) -> tuple[float, list[Evidence
                 return 0.9, ev, TriState.TRUE
 
     # both concepts present but not in order (V4 §20 — B must not match)
-    return 0.2, [], TriState.FALSE
+    return 0.0, [], TriState.FALSE
 
 
 def score_years_experience(facts, crit: SearchCriterion) -> tuple[float, list[EvidenceItem], str]:

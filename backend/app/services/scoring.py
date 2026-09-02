@@ -701,13 +701,13 @@ def score_candidate(
             required=crit.required, evidence=ev,
         ))
 
-        if crit.required and strength < _REQUIRED_MIN:
+        if crit.required:
             if crit.type in _SEMANTIC_TYPES:
-                # spec §15/§28 — exclude only on a confident FALSE, never on UNKNOWN
+                # spec §15/§28, V4 §24/§E.6 — a CONFIDENT FALSE always excludes
+                # (negative evidence beats a weak similarity); UNKNOWN never does.
                 if status == TriState.FALSE:
                     return _excluded(facts.person, components, crit)
-                # UNKNOWN required semantic: don't exclude, contributes 0
-            else:
+            elif strength < _REQUIRED_MIN:
                 return _excluded(facts.person, components, crit)
 
         total += score
