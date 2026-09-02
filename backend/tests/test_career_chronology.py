@@ -74,7 +74,10 @@ def test_transition_through_score_candidate_ranks_correctly():
     good = score_candidate(_facts(_CONSULTING_THEN_TECH), plan)
     bad = score_candidate(_facts(_TECH_THEN_SIDE_CONSULTING), plan)
     assert good.match_score > bad.match_score
-    assert bad.excluded_reason is not None
+    assert good.qualification == "exact_match"
+    # V4 §10 — a sequence that can't be verified is UNKNOWN, not FALSE:
+    # not excluded, but only a possible match
+    assert bad.qualification == "possible_match"
 
 
 # ─────────────────── §39 years experience ───────────────────

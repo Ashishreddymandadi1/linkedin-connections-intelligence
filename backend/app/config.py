@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     semantic_judge_batch_size: int = 10
     semantic_judge_low: float = 0.15        # below this concept strength: skip judging, already a clear miss
     semantic_judge_high: float = 0.75       # above this: skip judging, already a clear hit
+    #: a cached company classification below this confidence is treated as UNKNOWN
+    #: (V4 §7) — a low-confidence TRUE cannot produce an EXACT_MATCH
+    company_category_confidence_min: float = 0.6
 
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

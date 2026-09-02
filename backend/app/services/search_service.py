@@ -198,35 +198,23 @@ def _resolve_company_ids(db: Session, dataset_id: str, parsed: ParsedSearchQuery
 
 
 def _pool_company_class(db: Session, parsed: ParsedSearchQuery, exp_by_person: dict) -> dict:
-    """Classify (once, cached) the distinct employers that appear in the
-    candidate pool — only when the query actually asks about company category /
-    industry, and bounded to the pool's companies. Every later search reuses the
-    cache (spec §4/§36 — batched, cached, never per-search-per-company)."""
-    wants_company_semantics = any(
-        c.type in (CriterionType.COMPANY_CATEGORY, CriterionType.SEMANTIC_CONCEPT) for c in parsed.criteria
-    )
+    """CACHE-ONLY employer classification for the candidate pool (V4 §8). Normal
+    search NEVER launches classification LLM jobs — a missing classification is
+    left UNKNOWN. Bulk classification happens only via backfill / a maintenance
+    job (scripts.backfill_v3 / enrichment_runner.classify_companies)."""
+    from app.services.company_intel import company_key, to_dict
+
     seen: dict[tuple, tuple] = {}
     for exps in exp_by_person.values():
         for e in exps:
             if e.company_name:
-                seen.setdefault((e.company_id, e.company_name), (e.company_id, e.company_name, e.company_linkedin_url))
-    companies = list(seen.values())
-    if not companies:
+                seen.setdefault((e.company_id, e.company_name),
+                                (e.company_id, e.company_name, e.company_linkedin_url))
+    if not seen:
         return {}
-    if not wants_company_semantics or not settings.company_classification_enabled:
-        # cache-only — don't spend LLM calls if the query didn't ask
-        from app.services.company_intel import company_key
-
-        keys = [company_key(cid, nm) for cid, nm, _ in companies]
-        rows = repo.get_company_semantics(db, keys)
-        from app.services.company_intel import to_dict
-
-        return {k: to_dict(r) for k, r in rows.items()}
-    from app.services.company_intel import get_or_classify
-
-    result = get_or_classify(db, companies)
-    db.commit()
-    return result
+    keys = [company_key(cid, nm) for cid, nm, _ in seen.values()]
+    rows = repo.get_company_semantics(db, keys)
+    return {k: to_dict(r) for k, r in rows.items()}
 
 
 def _maybe_judge(db, query, parsed, scored, facts_by_id, candidates, ctx, llm_available):

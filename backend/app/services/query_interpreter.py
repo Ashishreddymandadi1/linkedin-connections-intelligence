@@ -246,7 +246,9 @@ def _finalize(parsed: ParsedSearchQuery, query: str, issues: list[str]) -> None:
     _promote_subject(parsed, query)
     summary, confidence = build_summary(parsed, query)
     parsed.interpretation_summary = summary
-    parsed.interpretation_confidence = confidence
+    # a cap set by validate_and_repair (unrepaired OR/NOT mismatch, V4 §9) must
+    # NOT be raised again here.
+    parsed.interpretation_confidence = round(min(confidence, parsed.interpretation_confidence_cap), 2)
     if issues:
         log.info("query plan repairs for %r: %s", query, "; ".join(issues))
 
@@ -385,7 +387,13 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
             if re.search(r"\b(compan(?:y|ies)|firms?)\b", nl) or any(w in nl for w in _COMPANY_CATEGORY_WORDS):
                 continue
             if name and nl not in used_spans and nl not in _KNOWN_SKILLS:
-                crits.append(SearchCriterion(id=f"co_{_slug(name)}", type=CriterionType.CURRENT_COMPANY, value=name, weight=30, required=False))
+                # "worked at X" / bare "at X" is ANY experience; only "works at X" is current
+                verb = m.group(0)[: m.start(1) - m.start(0)].lower()
+                current = "works at" in verb or "work at" in verb
+                crits.append(SearchCriterion(
+                    id=f"co_{_slug(name)}", type=CriterionType.CURRENT_COMPANY, value=name,
+                    scope=None if current else Scope.ANY_EXPERIENCE, weight=30, required=False,
+                ))
                 used_spans.append(nl)
 
     for skill in sorted(_KNOWN_SKILLS, key=lambda s: -len(s)):

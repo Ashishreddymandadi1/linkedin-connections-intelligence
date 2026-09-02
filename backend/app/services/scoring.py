@@ -53,8 +53,15 @@ from app.services.matching import (
 )
 
 _REQUIRED_MIN = 0.15   # below this a required non-semantic criterion is a hard miss
-_EXACT_MIN = 0.55      # a required non-semantic criterion counts as TRUE (exact) only above this
+_EXACT_MIN = 0.55      # a required FUZZY non-semantic criterion (title/seniority) counts as
+                       # TRUE only above this — "Director" does not satisfy "CXO"
 _MATCHED_MIN = 0.2
+#: structured facts whose match is effectively binary in-scope — recency/duration
+#: weighting affects the *score* but not whether the fact is TRUE (review #1)
+_BINARY_FACT_TYPES = {
+    CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY, CriterionType.LOCATION,
+    CriterionType.EDUCATION, CriterionType.CERTIFICATION, CriterionType.LANGUAGE,
+}
 #: types evaluated as meaning (tri-state), never phrase matches (V4 §6/§29)
 _SEMANTIC_TYPES = {
     CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY,
@@ -159,13 +166,32 @@ def _experiences_in_scope(experiences: list, scope: str | None) -> list:
     return list(experiences)
 
 
+def _want_current_for(crit: SearchCriterion) -> bool | None:
+    """Resolve current/past/any for an employment criterion (V4 §1). An explicit
+    ``scope`` wins; otherwise the criterion type's default."""
+    if crit.scope in (Scope.ANY_EXPERIENCE, Scope.CAREER):
+        return None
+    if crit.scope in (Scope.CURRENT, Scope.CURRENT_COMPANY):
+        return True
+    if crit.scope in (Scope.PAST, Scope.PAST_COMPANY):
+        return False
+    return crit.type == CriterionType.CURRENT_COMPANY
+
+
 def _score_company(
     facts: ProfileFacts, value: str, *, want_current: bool | None, resolved_ids: set[str] | None = None
 ) -> tuple[float, list[EvidenceItem]]:
+    """STRICT scope (V4 §1): ``want_current=True`` only current roles satisfy,
+    ``want_current=False`` only NON-current roles satisfy, ``None`` any role.
+    A current Amazon role does NOT partially satisfy "former Amazon"."""
     best = 0.0
     ev: list[EvidenceItem] = []
     recency_on = settings.recency_weighting_enabled
     for e in facts.experiences:
+        if want_current is True and not e.is_current:
+            continue
+        if want_current is False and e.is_current:
+            continue
         by_id = bool(resolved_ids) and bool(e.company_id) and e.company_id in resolved_ids
         if not by_id and not company_matches(e.company_name, value):
             continue
@@ -179,13 +205,7 @@ def _score_company(
                 "end_year": e.end_year, "is_current": e.is_current, "verified": by_id,
             },
         )
-        if want_current is True:
-            base = 1.0 if e.is_current else 0.35
-        elif want_current is False:
-            base = 1.0 if not e.is_current else 0.55
-        else:
-            base = 1.0
-        strength = base * experience_weight(e, enabled=recency_on)
+        strength = experience_weight(e, enabled=recency_on)  # 1.0 base, recency/duration only
         if strength > best:
             best, ev = strength, [item]
     return best, ev
@@ -385,45 +405,76 @@ def _category_field(concept: str) -> str | None:
 def _score_company_category(
     facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
 ) -> tuple[float, list[EvidenceItem], str]:
+    """Tri-state on the ACTUAL employer(s) in scope (V4 §7). A classification
+    below ``company_category_confidence_min`` is treated as UNKNOWN, so a
+    low-confidence TRUE cannot create an EXACT_MATCH."""
     concept = (crit.concept or crit.value or "").strip()
     field_name = _category_field(concept)
-    scoped = _experiences_in_scope(facts.experiences, crit.scope)
+    scope = crit.scope or Scope.CURRENT_COMPANY  # "startup" defaults to "now at a startup"
+    scoped = _experiences_in_scope(facts.experiences, scope)
+    cmin = settings.company_category_confidence_min
 
-    saw_false = False
+    saw_confident_false = False
+    saw_low_conf_true = False
     for e in scoped:
         row = ctx.company_class.get(
             company_key(getattr(e, "company_id", None), getattr(e, "company_name", None))
         )
         if not row:
             continue
+        conf = float(row.get("confidence") or 0.0)
         val = row.get(field_name) if field_name else None
-        if val is True:
+        if val is True and conf >= cmin:
             return 1.0, [
                 EvidenceItem(
                     type="company_inference",
                     text=f"{e.company_name} classified as {concept}"
                     + (f" (“{row.get('reason')}”)" if row.get("reason") else ""),
-                    detail={"confidence": row.get("confidence"), "provenance": row.get("provenance"),
+                    detail={"confidence": conf, "provenance": row.get("provenance"),
                             "company": e.company_name, "role": e.position},
                 )
             ], TriState.TRUE
-        if val is False:
-            saw_false = True
-        # loose category / industry text fallback when the concept isn't one of
-        # the mapped booleans (e.g. "consulting firm", "healthcare tech")
-        if field_name is None:
+        if val is True:
+            saw_low_conf_true = True
+        if val is False and conf >= cmin:
+            saw_confident_false = True
+        if field_name is None:  # loose industry/category text fallback
             for x in (row.get("industries") or []) + (row.get("categories") or []):
-                if concept_overlap(x, concept) >= 0.5:
+                if concept_overlap(x, concept) >= 0.5 and conf >= cmin:
                     return 0.85, [
                         EvidenceItem(type="company_inference", text=f"{e.company_name} is in {x}",
-                                     detail={"confidence": row.get("confidence"), "provenance": row.get("provenance")})
+                                     detail={"confidence": conf, "provenance": row.get("provenance")})
                     ], TriState.TRUE
 
-    if saw_false:
+    if saw_low_conf_true:
+        return 0.4, [EvidenceItem(type="company_inference",
+                                  text=f"employer may be {concept} (low-confidence classification)", detail={})], TriState.UNKNOWN
+    if saw_confident_false:
         return 0.0, [
             EvidenceItem(type="company_inference", text=f"employer(s) in scope are not classified as {concept}", detail={})
         ], TriState.FALSE
     return 0.0, [], TriState.UNKNOWN  # not classified yet / ambiguous — NOT a verified false
+
+
+def _exp_current_map(facts: ProfileFacts) -> dict:
+    return {getattr(e, "id", None): bool(getattr(e, "is_current", False)) for e in facts.experiences}
+
+
+def _scope_allows(scope: str | None, exp_ids, is_current_by_id: dict) -> bool:
+    """Whether an assertion / experience-semantic in scope (V4 §2/§3). Verified
+    structured history wins: an assertion claiming 'current' but linked only to
+    NON-current experiences is not current."""
+    if scope in (None, Scope.CAREER, Scope.ANY_EXPERIENCE):
+        return True
+    ids = [i for i in (exp_ids or []) if i in is_current_by_id]
+    if not ids:
+        return True  # no linked rows to contradict — leave to other signals
+    currents = [is_current_by_id[i] for i in ids]
+    if scope in (Scope.CURRENT, Scope.CURRENT_COMPANY):
+        return any(currents)
+    if scope in (Scope.PAST, Scope.PAST_COMPANY):
+        return any(not c for c in currents)
+    return True
 
 
 def _score_semantic_concept(
@@ -433,16 +484,21 @@ def _score_semantic_concept(
     if not concept:
         return 0.0, [], TriState.UNKNOWN
     sem = facts.semantic
+    scope = crit.scope
+    cur_by_id = _exp_current_map(facts)
 
     best_strength, best_ev, best_status = 0.0, [], TriState.UNKNOWN
 
-    # 0. experience-level semantics (V4 §29 — most specific, scope-aware). For a
-    #    ROLE_FUNCTION criterion match role_function/professional_domain/role_domains;
-    #    for INDUSTRY_EXPERIENCE match employer_industries.
+    # 0. experience-level semantics (V4 §2/§29 — most specific, scope-aware).
+    #    ROLE_FUNCTION -> role_function/professional_domain/role_domains;
+    #    INDUSTRY_EXPERIENCE -> employer_industries. Only experiences IN SCOPE
+    #    for the criterion are eligible.
     want_industry = crit.type == CriterionType.INDUSTRY_EXPERIENCE
     exp_sem = _career.exp_semantics_by_id(sem)
     if exp_sem:
-        for es in exp_sem.values():
+        for eid, es in exp_sem.items():
+            if not _scope_allows(scope, [eid], cur_by_id):
+                continue
             fields = (["employer_industries", "employer_categories"] if want_industry
                       else ["role_function", "professional_domain", "role_domains"])
             hit = 0.0
@@ -457,11 +513,14 @@ def _score_semantic_concept(
                     best_ev = [EvidenceItem(type="semantic",
                                             text=f"{'industry' if want_industry else 'role'}: "
                                                  f"{es.get('role_function') or (es.get('employer_industries') or ['?'])[0]}",
-                                            detail={"experience_id": es.get("experience_id"), "inferred": True})]
+                                            detail={"experience_id": eid, "inferred": True})]
 
-    # 1. a matching semantic assertion (strong — LLM-derived + evidence + source ids)
+    # 1. a matching semantic assertion (strong — LLM-derived + evidence + source ids).
+    #    Assertion scope is validated against the linked experiences (V4 §3).
     for a in sem.get("semantic_assertions", []):
         if not isinstance(a, dict):
+            continue
+        if not _scope_allows(scope, a.get("experience_ids"), cur_by_id):
             continue
         ov = concept_overlap(a.get("concept", ""), concept)
         if ov >= 0.5:
@@ -475,16 +534,24 @@ def _score_semantic_concept(
             if strength > best_strength:
                 best_strength, best_ev, best_status = strength, ev, TriState.TRUE
 
-    # 2. semantic fields
+    # 2. profile-level semantic fields — no per-experience scope, so for a
+    #    current/past-scoped criterion they are only a weak UNKNOWN-tier signal.
+    _profile_can_be_true = scope in (None, Scope.CAREER, Scope.ANY_EXPERIENCE)
+    if crit.type == CriterionType.INDUSTRY_EXPERIENCE:
+        _fields = (("industries", "industry"),)
+    elif crit.type == CriterionType.ROLE_FUNCTION:
+        _fields = (("job_families", "role"), ("role_keywords", "role"))
+    else:  # SEMANTIC_CONCEPT / PROFESSIONAL_CONCEPT — any dimension
+        _fields = (("industries", "industry"), ("job_families", "role"),
+                   ("domain_expertise", "domain expertise"),
+                   ("leadership_experience", "leadership"), ("role_keywords", "role"))
     if best_strength < 0.8:
-        for fld, label in (("industries", "industry"), ("job_families", "role"),
-                           ("domain_expertise", "domain expertise"), ("leadership_experience", "leadership"),
-                           ("role_keywords", "role")):
+        for fld, label in _fields:
             for v in sem.get(fld, []):
                 if concept_overlap(v, concept) >= 0.55 and 0.72 > best_strength:
-                    best_strength, best_ev, best_status = 0.72, [
-                        EvidenceItem(type="semantic", text=f"{label}: {v}", detail={"inferred": True})
-                    ], TriState.TRUE
+                    best_strength = 0.72 if _profile_can_be_true else 0.45
+                    best_status = TriState.TRUE if _profile_can_be_true else TriState.UNKNOWN
+                    best_ev = [EvidenceItem(type="semantic", text=f"{label}: {v}", detail={"inferred": True})]
 
     # 3. concept-vs-career cross-encoder (criterion-level, not whole query, spec §26).
     #    Skipped for role_function / industry_experience when we HAVE experience-
@@ -514,26 +581,39 @@ def _score_semantic_concept(
     return round(best_strength, 3), best_ev, best_status
 
 
+def _invert_tristate(status: str) -> str:
+    """Tri-state NOT (V4 §5): TRUE->FALSE, FALSE->TRUE, UNKNOWN->UNKNOWN. Missing
+    information is NOT proof of a negation."""
+    if status == TriState.TRUE:
+        return TriState.FALSE
+    if status == TriState.FALSE:
+        return TriState.TRUE
+    return TriState.UNKNOWN
+
+
 def _score_semantic_multi(
     facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
 ) -> tuple[float, list[EvidenceItem], str]:
-    """Score a semantic criterion honouring ``values`` + ``operator`` (V4 §4).
-    Single value -> plain concept scoring. ANY_OF -> best value. ALL_OF -> all
-    values must hold (min). NOT -> invert best."""
+    """Score a semantic criterion honouring ``values`` + ``operator`` (V4 §4/§5).
+    Each value keeps the parent's ``type`` + ``scope`` (review #2). ANY_OF -> best
+    value. ALL_OF -> all values must hold. NOT -> tri-state invert."""
     vals = [v for v in (crit.values or ([crit.value] if crit.value else [])) if v]
-    # a rich free-text concept is scored whole; a short value list is scored per value
-    if crit.concept and len(vals) <= 1:
-        return _score_semantic_concept(facts, crit, ctx)
-    if len(vals) <= 1:
-        return _score_semantic_concept(facts, crit, ctx)
 
-    results = [_score_semantic_concept(facts, _synthetic_crit(v), ctx) for v in vals]
+    if len(vals) <= 1:
+        # single value / rich free-text concept — score whole, then invert for NOT
+        s, ev, status = _score_semantic_concept(facts, crit, ctx)
+        if crit.operator == Operator.NOT:
+            return round(1.0 - s, 3), [], _invert_tristate(status)
+        return s, ev, status
+
+    def _child(i: int, v: str) -> SearchCriterion:
+        return SearchCriterion(id=f"{crit.id}#{i}", type=crit.type, concept=v,
+                               value=v, scope=crit.scope, weight=1)
+
+    results = [_score_semantic_concept(facts, _child(i, v), ctx) for i, v in enumerate(vals)]
     if crit.operator == Operator.NOT:
         best = max(results, key=lambda r: r[0])
-        inv = 1.0 - best[0]
-        status = TriState.FALSE if best[2] == TriState.TRUE else (
-            TriState.TRUE if best[0] < _REQUIRED_MIN else TriState.UNKNOWN)
-        return round(inv, 3), [], status
+        return round(1.0 - best[0], 3), [], _invert_tristate(best[2])
     if crit.operator == Operator.ALL_OF:
         strength = min(r[0] for r in results)
         if any(r[2] == TriState.FALSE for r in results):
@@ -605,7 +685,7 @@ def _score_one(
             return _score_chronology(facts, crit, ctx)
 
         if crit.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY):
-            want = crit.type == CriterionType.CURRENT_COMPANY
+            want = _want_current_for(crit)
             rids = ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None
             s, e = _combine_over_values(
                 crit, lambda v: _score_company(facts, v, want_current=want, resolved_ids=rids)
@@ -725,10 +805,15 @@ def score_candidate(
                     unmet.append(_label(crit))
                 elif status != TriState.TRUE:
                     uncertain.append(_label(crit))
+            elif crit.type in _BINARY_FACT_TYPES:
+                # a structured fact either matched (in scope) or it didn't —
+                # recency weighting must not demote a real match (review #1)
+                if strength < _REQUIRED_MIN:
+                    unmet.append(_label(crit))
             elif strength < _REQUIRED_MIN:
-                unmet.append(_label(crit))          # clear miss (e.g. wrong city)
+                unmet.append(_label(crit))          # clear miss
             elif strength < _EXACT_MIN:
-                unmet.append(_label(crit))          # partial (e.g. Director when CXO asked) -> near-match
+                unmet.append(_label(crit))          # partial (Director when CXO asked) -> near-match
 
         total += score
         if strength >= _MATCHED_MIN:

@@ -200,6 +200,15 @@ class ExperienceSemantic(BaseModel):
         "leadership_signals", "mentoring_signals", "founder_signals", mode="before",
     )(staticmethod(_coerce_str_list))
 
+    @field_validator("role_function", "professional_domain", "role_seniority", mode="before")
+    @classmethod
+    def _first_if_list(cls, v):
+        # LLMs sometimes wrap a scalar in a list — don't let that sink the whole
+        # profile's enrichment (review #7)
+        if isinstance(v, (list, tuple)):
+            return (str(v[0]).strip() if v else None) or None
+        return v
+
 
 class ProfileSemanticData(BaseModel):
     seniority_level: str | None = None
@@ -396,6 +405,9 @@ class ParsedSearchQuery(BaseModel):
     interpretation_summary: str = ""
     #: 0..1 — lower for semantically ambiguous queries ("people who worked in tech")
     interpretation_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    #: hard upper bound set by the plan validator on an unresolved structural
+    #: problem (V4 §9) — _finalize() must not raise confidence above this.
+    interpretation_confidence_cap: float = Field(default=1.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _normalize_weights(self) -> "ParsedSearchQuery":

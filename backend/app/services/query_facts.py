@@ -250,30 +250,42 @@ def extract_facts(query: str, *, context: dict[str, str] | None = None) -> FactS
     return fs
 
 
-#: "moved from consulting to tech" / "left big tech for startups" /
-#: "former researchers now in industry" / "engineers who moved into product"
+#: explicit transition verbs — "from X to Y" only counts as a transition when a
+#: transition verb is present, so "moved to Seattle to join a startup" (review #8)
+#: is NOT parsed as career_transition(from "to seattle" to "join a startup").
 _TRANSITION_RES = (
-    re.compile(r"\b(?:moved|transitioned|switched|shifted|pivoted|went)\s+(?:from\s+)?"
-               r"(.+?)\s+(?:to|into)\s+(.+?)(?:\s*$|[,.])", re.I),
+    re.compile(r"\b(?:moved|transitioned|switched|shifted|pivoted|went|transition)\s+"
+               r"from\s+(.+?)\s+(?:to|into)\s+(.+?)(?:\s*$|[,.])", re.I),
+    re.compile(r"\b(?:moved|transitioned|switched|shifted|pivoted)\s+(?:into|to)\s+(.+?)\s+from\s+(.+?)(?:\s*$|[,.])", re.I),
     re.compile(r"\bleft\s+(.+?)\s+for\s+(.+?)(?:\s*$|[,.])", re.I),
     re.compile(r"\bformer\s+(.+?)\s+(?:now|currently|later)\s+(?:working\s+)?"
-               r"(?:in|at|as|joined)\s+(.+?)(?:\s*$|[,.])", re.I),
+               r"(?:in|as)\s+(.+?)(?:\s*$|[,.])", re.I),
 )
 _TRANSITION_STOP = re.compile(r"\b(people|person|someone|who|that|which|those|profiles?)\b", re.I)
+#: a from/to that is really a company name or a company category is already
+#: covered by past_company / company_category — don't add a redundant transition
+_NOT_A_TRANSITION_END = {
+    "amazon", "google", "meta", "microsoft", "apple", "netflix", "startup", "startups",
+    "big tech", "faang", "a startup", "startups now", "industry",
+}
 
 
 def _extract_transition(q: str, fs: FactSet) -> None:
-    for rx in _TRANSITION_RES:
+    for i, rx in enumerate(_TRANSITION_RES):
         m = rx.search(q)
         if not m:
             continue
-        frm = _TRANSITION_STOP.sub("", m.group(1)).strip(" .,")
-        to = _TRANSITION_STOP.sub("", m.group(2)).strip(" .,")
-        # normalise a couple of very common shorthands
+        # pattern 1 (into/to ... from ...) has the groups reversed
+        g1, g2 = (m.group(2), m.group(1)) if i == 1 else (m.group(1), m.group(2))
+        frm = _TRANSITION_STOP.sub("", g1).strip(" .,?!;:")
+        to = _TRANSITION_STOP.sub("", g2).strip(" .,?!;:")
         to = re.sub(r"\btech\b", "technology", to, flags=re.I)
         frm = re.sub(r"\btech\b", "technology", frm, flags=re.I)
         if len(frm) < 2 or len(to) < 2:
             continue
+        if frm.lower() in _NOT_A_TRANSITION_END or to.lower() in _NOT_A_TRANSITION_END:
+            fs.notes.append(f"transition '{frm} -> {to}' left to past_company/company_category")
+            return
         fs.criteria.append(SearchCriterion(
             id="transition", type=CriterionType.CAREER_TRANSITION,
             concept=f"from {frm} to {to}", scope=Scope.CAREER, weight=45, required=True,
@@ -479,6 +491,7 @@ def validate_and_repair(plan: ParsedSearchQuery, query: str, facts: FactSet, *, 
         unrepaired = True
 
     if unrepaired:
+        plan.interpretation_confidence_cap = min(plan.interpretation_confidence_cap, 0.5)
         plan.interpretation_confidence = round(min(plan.interpretation_confidence, 0.5), 2)
     return plan, issues
 
