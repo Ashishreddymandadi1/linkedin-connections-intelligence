@@ -334,6 +334,13 @@ class SearchCriterion(BaseModel):
 class ParsedSearchQuery(BaseModel):
     intent: str = "professional_recommendation"
     criteria: list[SearchCriterion]
+    #: non-candidate framing (V4 §14) — e.g. {"purpose": "networking event"}. These
+    #: words must NOT become criteria.
+    context: dict[str, str] = {}
+    #: one plain-English sentence describing how the query was read (V4 §18)
+    interpretation_summary: str = ""
+    #: 0..1 — lower for semantically ambiguous queries ("people who worked in tech")
+    interpretation_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _normalize_weights(self) -> "ParsedSearchQuery":

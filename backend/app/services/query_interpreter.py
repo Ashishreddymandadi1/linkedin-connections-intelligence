@@ -26,6 +26,12 @@ from app.constants import CriterionType, Operator, Scope
 from app.schemas import ParsedSearchQuery, SearchCriterion
 from app.services.llm.router import generate_structured
 from app.services.matching import seniority_rank
+from app.services.query_facts import (
+    build_summary,
+    extract_facts,
+    strip_context,
+    validate_and_repair,
+)
 
 log = logging.getLogger("app.query")
 
@@ -75,7 +81,18 @@ _SYSTEM = (
     "demands it as a filter, not a preference - 'currently at Google who knows Java' -> Google "
     "required, Java preferred. 'Former Amazon people now at startups' -> BOTH past_company(Amazon) "
     "and company_category(startup, scope current_company) are required - it is a single query about "
-    "two facts that must both hold, not a nice-to-have. Weights MUST sum to 100."
+    "two facts that must both hold, not a nice-to-have. Weights MUST sum to 100.\n\n"
+    "REQUIREDNESS FROM MEANING (do not wait for the words 'must'/'only'): the plural noun that is "
+    "the SUBJECT of the query is always required. 'CXOs in Nashville' -> seniority(CXO) AND "
+    "location(Nashville) BOTH required. 'former Amazon employees' -> past_company(Amazon) required. "
+    "'software engineers at fintech companies' -> role and fintech-employer both required.\n\n"
+    "CONTEXT vs CANDIDATE REQUIREMENT: words describing the EVENT or PURPOSE are not candidate "
+    "criteria. 'people to invite to a networking event' -> networking is context, NOT skill=networking. "
+    "'speak at an AI conference' -> AI expertise may be a criterion, 'conference' is context. Put "
+    "event/purpose framing in the top-level `context` object ({\"purpose\": \"...\"}), never as a "
+    "criterion. Contrast: 'people with professional networking expertise' -> networking IS a criterion.\n\n"
+    "Also set `interpretation_summary` (one sentence: how you read the query) and "
+    "`interpretation_confidence` (0..1; lower it for vague queries like 'people who worked in tech')."
 )
 
 
@@ -103,11 +120,19 @@ def _soften_requirements(parsed: ParsedSearchQuery, query: str) -> ParsedSearchQ
 
 
 def interpret_query(query: str) -> tuple[ParsedSearchQuery, str, str | None]:
-    """Return ``(parsed, provider_name, model)``. provider = 'deterministic' on fallback."""
+    """Return ``(parsed, provider_name, model)``. provider = 'deterministic' on
+    fallback. Every path runs the deterministic fact layer (V4 §15) so explicit
+    locations / companies / OR / NOT survive even a perfect-looking LLM plan and
+    even a total LLM outage."""
+    cleaned, context = strip_context(query)
+    facts = extract_facts(cleaned, context=context)
+
     if settings.llm_query_interpretation:
         result = generate_structured(
             _SYSTEM,
-            f"Search query: {query!r}\nProduce the search-plan JSON.",
+            f"Search query: {cleaned!r}\n"
+            + (f"Event/context (NOT a candidate requirement): {context['purpose']!r}\n" if context.get("purpose") else "")
+            + "Produce the search-plan JSON.",
             ParsedSearchQuery,
             max_tokens=1200,
             operation="query_interpretation",
@@ -115,10 +140,61 @@ def interpret_query(query: str) -> tuple[ParsedSearchQuery, str, str | None]:
         if result is not None:
             parsed, provider, model = result
             if parsed.criteria:
-                return _soften_requirements(parsed, query), provider, model
+                parsed = _soften_requirements(parsed, query)
+                parsed, issues = validate_and_repair(parsed, query, facts, context=context)
+                _finalize(parsed, query, issues)
+                return parsed, provider, model
         log.info("query interpreter: falling back to deterministic parser")
 
-    return _soften_requirements(_deterministic_parse(query), query), "deterministic", None
+    parsed = _soften_requirements(_deterministic_parse(cleaned), query)
+    parsed, issues = validate_and_repair(parsed, query, facts, context=context)
+    _finalize(parsed, query, issues)
+    return parsed, "deterministic", None
+
+
+#: the plural noun that is the SUBJECT of a query is always a hard filter, even
+#: without "must"/"only" (V4 §19). "CXOs in Nashville" -> CXO required.
+_SUBJECT_RE = re.compile(
+    r"^\s*(?:the\s+|former\s+|ex[- ]|current\s+|senior\s+|top\s+|good\s+)*"
+    r"(cxos?|ceos?|ctos?|cfos?|coos?|executives?|founders?|co-?founders?|"
+    r"engineers?|developers?|architects?|managers?|directors?|vps?|"
+    r"consultants?|researchers?|scientists?|designers?|leaders?|mentors?|"
+    r"analysts?|recruiters?|marketers?|salespeople|advisors?)\b",
+    re.I,
+)
+_SUBJECT_TYPES = {
+    CriterionType.SENIORITY, CriterionType.TITLE, CriterionType.SEMANTIC_CONCEPT,
+}
+
+
+_CXO_WORDS_RE = re.compile(r"\b(cxo|ceo|cto|cfo|coo|cmo|cpo|ciso|cio|chief|executive)s?\b", re.I)
+
+
+def _promote_subject(parsed: ParsedSearchQuery, query: str) -> None:
+    # a seniority word in the query's SUBJECT or in the event PURPOSE is a filter
+    subject = _SUBJECT_RE.match(query)
+    purpose = parsed.context.get("purpose", "")
+    cxo_context = bool(_CXO_WORDS_RE.search(purpose))
+    if not subject and not cxo_context:
+        return
+    word = subject.group(1).rstrip("s").lower() if subject else ""
+    for c in parsed.criteria:
+        text = f"{c.value} {c.concept} {' '.join(c.values)}".lower()
+        if c.type == CriterionType.SENIORITY and (cxo_context or subject):
+            c.required = True
+            return
+        if c.type in _SUBJECT_TYPES and word and word in text:
+            c.required = True
+            return
+
+
+def _finalize(parsed: ParsedSearchQuery, query: str, issues: list[str]) -> None:
+    _promote_subject(parsed, query)
+    summary, confidence = build_summary(parsed, query)
+    parsed.interpretation_summary = summary
+    parsed.interpretation_confidence = confidence
+    if issues:
+        log.info("query plan repairs for %r: %s", query, "; ".join(issues))
 
 
 # ─────────────────────── deterministic parser ───────────────────────
@@ -237,19 +313,30 @@ def _deterministic_parse(query: str) -> ParsedSearchQuery:
             crits.append(SearchCriterion(id=f"skill_{_slug(skill)}", type=CriterionType.SKILL, value=skill, weight=20, required=False))
             used_spans.append(skill)
 
-    rank = seniority_rank(ql)
+    # seniority — singularise so "CXOs" / "founders" register; treat a bare
+    # "executive(s)" query word as CXO-level intent (it never means it on a real
+    # profile, so it only lives here on the query side)
+    ql_sing = re.sub(r"\b(cxo|ceo|cto|cfo|coo|founder|director|manager|"
+                     r"vp|principal|lead|head|architect)s\b", r"\1", ql)
+    if re.search(r"\bexecutives?\b", ql):
+        ql_sing += " cxo"
+    rank = seniority_rank(ql_sing)
     if rank is not None and rank >= 3:
-        label = next((w for w in ["cxo", "principal", "staff", "senior", "director", "vp", "lead", "founder", "head", "ceo", "cto", "cfo", "coo"] if w in ql), "senior")
+        label = next((w for w in ["cxo", "executive", "principal", "staff", "senior", "director", "vp", "lead", "founder", "head", "ceo", "cto", "cfo", "coo"] if re.search(rf"\b{w}s?\b", ql)), "senior")
         crits.append(SearchCriterion(id="seniority", type=CriterionType.SENIORITY, value=label, weight=15, required=False))
 
+    _company_words = {w for c in crits if c.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY)
+                      for w in (c.values or [c.value]) for w in w.lower().split()}
     for m in re.finditer(r"\b([a-z]+)\s+(engineer|engineers|developer|developers|manager|managers|scientist|scientists|designer|designers|architect|architects)\b", ql):
+        if m.group(1) in _company_words:  # "Meta engineers" -> Meta is the employer, not a title
+            continue
         title = f"{m.group(1)} {m.group(2)}".rstrip("s")
         crits.append(SearchCriterion(id=f"title_{_slug(title)}", type=CriterionType.TITLE, value=title, weight=20, required=False))
 
     # anything left over that looks like an industry/concept word becomes a
     # low-weight semantic_concept rather than a literal keyword search — weak,
     # but never silently dropped, and never a false literal-text match either.
-    if not crits or (len(crits) == 1 and crits[0].type == CriterionType.SENIORITY):
+    if not crits or all(c.type == CriterionType.SENIORITY for c in crits):
         for kw in _keywords(q):
             crits.append(SearchCriterion(id=f"concept_{_slug(kw)}", type=CriterionType.SEMANTIC_CONCEPT, concept=kw, weight=15, required=False))
     if not crits:
@@ -262,6 +349,8 @@ _STOP = {
     "who", "should", "i", "reach", "out", "to", "for", "about", "people", "person", "in", "my",
     "network", "and", "the", "a", "an", "with", "know", "knows", "at", "of", "that", "currently",
     "previously", "worked", "works", "both", "someone", "find", "list", "give", "me",
+    "moved", "move", "from", "now", "then", "later", "into", "invite", "recommend",
+    "cxo", "cxos", "ceo", "cto", "cfo", "coo", "executive", "executives",
 }
 
 
