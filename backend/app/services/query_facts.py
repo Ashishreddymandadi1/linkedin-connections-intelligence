@@ -515,13 +515,22 @@ def build_summary(plan: ParsedSearchQuery, query: str) -> tuple[str, float]:
         tag = "required" if c.required else "preferred"
         parts.append(f"{prefix}{c.type.replace('_', ' ')}: {label}{scope} [{tag}]")
 
-    summary = "Interpreted as — " + "; ".join(parts) if parts else "No structured criteria found."
+    head = f"[intent: {plan.intent.replace('_', ' ')}]"
+    summary = "Interpreted as — " + "; ".join([head, *parts]) if parts else \
+        f"Interpreted as — {head}; no structured criteria found."
     if plan.context.get("purpose"):
         summary += f". Context (not a filter): {plan.context['purpose']}."
+    if plan.target_person_context:
+        tp = ", ".join(f"{k}={v}" for k, v in plan.target_person_context.items())
+        summary += f". Relational context (not a filter): {tp}."
+    if plan.unresolved:
+        summary += f". Unresolved (not guessed): {', '.join(plan.unresolved)}."
 
     confidence = 0.85
     if _AMBIGUOUS_RE.search(query):
         confidence -= 0.25
+    if plan.unresolved:
+        confidence -= 0.3
     required_facts = sum(1 for c in plan.criteria if c.required and c.type in _FACT_TYPES)
     if required_facts == 0 and any(
         c.type in (CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY) for c in plan.criteria

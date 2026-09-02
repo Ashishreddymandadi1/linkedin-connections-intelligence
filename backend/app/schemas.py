@@ -10,7 +10,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.constants import ALL_CRITERION_TYPES, ALL_OPERATORS, ALL_SCOPES, Operator
+from app.constants import (
+    _QUERY_INTENT_ALIASES,
+    ALL_CRITERION_TYPES,
+    ALL_MODALITIES,
+    ALL_OPERATORS,
+    ALL_QUERY_INTENTS,
+    ALL_SCOPES,
+    Modality,
+    Operator,
+    QueryIntent,
+)
 
 # ─────────────────────────── datasets ───────────────────────────
 
@@ -348,6 +358,17 @@ class SearchCriterion(BaseModel):
     #: free-text semantic concept description — required for semantic_concept /
     #: company_category, ignored for exact-fact types.
     concept: str | None = None
+    #: certainty the query attaches to this requirement (V4 PART 2 §5).
+    #: "possible" ("might have X", "possible X experience") keeps the concept as
+    #: a soft ranking signal only — it is never a hard filter regardless of
+    #: ``required``.
+    modality: str = Modality.CERTAIN
+
+    @field_validator("modality")
+    @classmethod
+    def _known_modality(cls, v: str) -> str:
+        v = (v or Modality.CERTAIN).strip().lower()
+        return v if v in ALL_MODALITIES else Modality.CERTAIN
 
     @field_validator("type")
     @classmethod
@@ -396,13 +417,44 @@ class SearchCriterion(BaseModel):
 
 
 class ParsedSearchQuery(BaseModel):
-    intent: str = "professional_recommendation"
+    #: reusable search intent (V4 PART 2 §1) — one of ``ALL_QUERY_INTENTS``.
+    #: Shapes which criteria matter; never a search phrase itself.
+    intent: str = QueryIntent.PROFESSIONAL_RECOMMENDATION
+    #: candidate requirements — what a PERSON must / should look like. Distinct
+    #: from ``context`` (event framing) and ``target_person_context`` (the
+    #: mentee / the searcher). V4 PART 2 §2: the sentence is NOT turned into one
+    #: search phrase.
     criteria: list[SearchCriterion]
     #: non-candidate framing (V4 §14) — e.g. {"purpose": "networking event"}. These
     #: words must NOT become criteria.
     context: dict[str, str] = {}
+    #: relational context that SHAPES candidate criteria but is NEVER a search
+    #: phrase (V4 PART 2 §3) — e.g. {"field": "backend engineering",
+    #: "current_role": "backend engineer", "goal": "engineering management"}.
+    #: For "my field" this is filled from the configured current-user profile;
+    #: if that is not configured the key is added to ``unresolved`` instead.
+    target_person_context: dict[str, str] = {}
+    #: context keys the interpreter could NOT resolve (e.g. "field" when the
+    #: query said "my field" but no current-user profile is configured). Lowers
+    #: interpretation_confidence; the value is never hallucinated.
+    unresolved: list[str] = []
     #: one plain-English sentence describing how the query was read (V4 §18)
     interpretation_summary: str = ""
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _known_intent(cls, v) -> str:
+        v = str(v or "").strip().lower().replace(" ", "_").replace("-", "_")
+        if v in ALL_QUERY_INTENTS:
+            return v
+        if v in _QUERY_INTENT_ALIASES:
+            return _QUERY_INTENT_ALIASES[v]
+        return QueryIntent.PROFESSIONAL_RECOMMENDATION
+
+    @field_validator("unresolved", mode="before")
+    @classmethod
+    def _norm_unresolved(cls, v):
+        return _coerce_str_list(v)
     #: 0..1 — lower for semantically ambiguous queries ("people who worked in tech")
     interpretation_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     #: hard upper bound set by the plan validator on an unresolved structural

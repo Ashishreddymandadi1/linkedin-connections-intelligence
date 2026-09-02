@@ -132,6 +132,74 @@ _QUALIFICATION_RANK = {
 }
 
 
+class QueryIntent:
+    """What the searcher is actually trying to accomplish (V4 PART 2 §1).
+
+    Reusable across arbitrary professional-network questions — NOT one branch per
+    phrasing. The intent shapes which candidate criteria matter and how strict
+    they are; it never becomes a search phrase itself.
+    """
+
+    #: "find <people matching a description>" — an interrogative / imperative
+    #: lookup with concrete-ish criteria ("who are the data scientists in NYC").
+    FIND_PEOPLE = "find_people"
+    #: "who should I reach out to about X" — a soft, ranked recommendation with
+    #: no single hard filter. The default for a declarative noun phrase.
+    PROFESSIONAL_RECOMMENDATION = "professional_recommendation"
+    #: "who could mentor / advise / coach <someone>" — relational: evidence of
+    #: developing people, judged against a mentee context, never a literal
+    #: "mentor" match and never "senior => mentor".
+    MENTOR_RECOMMENDATION = "mentor_recommendation"
+    #: "experts in X" / "deep knowledge of X" — depth in a subject, not just
+    #: incidental exposure.
+    SUBJECT_MATTER_EXPERTISE = "subject_matter_expertise"
+    #: "people who moved from A to B" / "A -> B transitions" — an ordered career
+    #: change is the point of the query.
+    CAREER_TRANSITION = "career_transition"
+    #: "who should I invite to <event>" — the event is context; candidate
+    #: criteria are whatever describes the guest, minus the event framing.
+    NETWORKING_INVITATION = "networking_invitation"
+
+
+ALL_QUERY_INTENTS = {
+    v for k, v in vars(QueryIntent).items() if not k.startswith("_") and isinstance(v, str)
+}
+
+#: intent words / near-synonyms an LLM (or a loose caller) might emit
+_QUERY_INTENT_ALIASES = {
+    "find": "find_people", "search": "find_people", "lookup": "find_people",
+    "people_search": "find_people", "discovery": "find_people",
+    "recommend": "professional_recommendation", "recommendation": "professional_recommendation",
+    "referral": "professional_recommendation", "reach_out": "professional_recommendation",
+    "mentor": "mentor_recommendation", "mentorship": "mentor_recommendation",
+    "advice": "mentor_recommendation", "advising": "mentor_recommendation",
+    "coaching": "mentor_recommendation", "guidance": "mentor_recommendation",
+    "expert": "subject_matter_expertise", "expertise": "subject_matter_expertise",
+    "sme": "subject_matter_expertise", "subject_matter_expert": "subject_matter_expertise",
+    "specialist": "subject_matter_expertise",
+    "transition": "career_transition", "career_change": "career_transition",
+    "career_move": "career_transition", "pivot": "career_transition",
+    "networking": "networking_invitation", "invite": "networking_invitation",
+    "invitation": "networking_invitation", "event": "networking_invitation",
+    "introduction": "networking_invitation",
+}
+
+
+class Modality:
+    """Certainty the query attaches to a requirement (V4 PART 2 §5).
+
+    "HIPAA compliance experts" is CERTAIN; "might have HIPAA compliance
+    experience" / "possible HIPAA experience" is POSSIBLE — a soft signal that
+    can lift a ranking but must never be a hard filter.
+    """
+
+    CERTAIN = "certain"
+    POSSIBLE = "possible"
+
+
+ALL_MODALITIES = {Modality.CERTAIN, Modality.POSSIBLE}
+
+
 class Operator:
     """How a criterion's ``values`` combine (spec §13)."""
 

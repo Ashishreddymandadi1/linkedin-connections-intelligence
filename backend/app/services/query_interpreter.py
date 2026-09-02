@@ -32,6 +32,7 @@ from app.services.query_facts import (
     strip_context,
     validate_and_repair,
 )
+from app.services.query_intent import augment_plan
 
 log = logging.getLogger("app.query")
 
@@ -105,7 +106,38 @@ _SYSTEM = (
     "event/purpose framing in the top-level `context` object ({\"purpose\": \"...\"}), never as a "
     "criterion. Contrast: 'people with professional networking expertise' -> networking IS a criterion.\n\n"
     "Also set `interpretation_summary` (one sentence: how you read the query) and "
-    "`interpretation_confidence` (0..1; lower it for vague queries like 'people who worked in tech')."
+    "`interpretation_confidence` (0..1; lower it for vague queries like 'people who worked in tech').\n\n"
+    "UNIVERSAL REPRESENTATION (V4 PART 2) — the plan must generalize beyond "
+    "company/title/location/skill:\n"
+    "  - `intent`: one of find_people, professional_recommendation, "
+    "mentor_recommendation, subject_matter_expertise, career_transition, "
+    "networking_invitation. Pick what the searcher is trying to DO.\n"
+    "  - `target_person_context`: {field, current_role, goal} for the person the "
+    "candidate must help — the mentee in 'mentor for a backend engineer moving "
+    "into management' ({current_role: 'backend engineer', field: 'backend "
+    "engineering', goal: 'engineering management'}), or the searcher for 'anyone "
+    "in my field'. This is NEVER a criterion / search phrase. For 'my field' use "
+    "the searcher profile line below if present; if it is absent, leave the field "
+    "out and add 'field' to `unresolved` — do NOT guess it.\n"
+    "  - Do NOT turn a relational sentence into one search phrase. Decompose it "
+    "into candidate criteria: 'who could mentor a backend engineer moving into "
+    "management' -> criteria: engineering-management/leadership experience "
+    "(required, professional_concept), evidence of mentoring/coaching/advising "
+    "others (required), familiarity with backend engineering (preferred), similar "
+    "IC->manager trajectory (preferred). Never require the literal word 'mentor'. "
+    "Seniority alone does NOT imply mentor.\n"
+    "  - CROSS-DOMAIN AND: 'cybersecurity and healthcare', 'AI and healthcare', "
+    "'research plus industry experience' -> TWO separate REQUIRED criteria (both "
+    "must hold), not one blended concept and not ANY_OF.\n"
+    "  - MODALITY: 'might have HIPAA experience' / 'possible HIPAA compliance "
+    "experience' -> set `modality: possible` on that criterion, required=false, "
+    "low weight. It must NOT be identical to 'HIPAA compliance experts'.\n"
+    "  - ACADEMIA: keep these distinct — professor/faculty EMPLOYMENT "
+    "(professional_concept 'faculty appointment'), research EMPLOYMENT, a "
+    "university DEGREE (education), and PUBLICATIONS (publication). Studying at a "
+    "university is NOT working in academia; one paper is NOT a professor. "
+    "'professors in AI' -> faculty-appointment (required) + research/teaching "
+    "focus on AI (required), NOT education=AI."
 )
 
 
@@ -145,6 +177,14 @@ def interpret_query(query: str) -> tuple[ParsedSearchQuery, str, str | None]:
             _SYSTEM,
             f"Search query: {cleaned!r}\n"
             + (f"Event/context (NOT a candidate requirement): {context['purpose']!r}\n" if context.get("purpose") else "")
+            + (
+                f"Searcher profile (only for resolving 'my ...' references): "
+                f"field={settings.user_field!r}"
+                + (f", current_role={settings.user_current_role!r}" if settings.user_current_role else "")
+                + (f", goal={settings.user_goal!r}" if settings.user_goal else "")
+                + "\n"
+                if settings.user_field else ""
+            )
             + "Produce the search-plan JSON.",
             ParsedSearchQuery,
             max_tokens=1200,
@@ -243,7 +283,14 @@ def _promote_subject(parsed: ParsedSearchQuery, query: str) -> None:
 
 
 def _finalize(parsed: ParsedSearchQuery, query: str, issues: list[str]) -> None:
+    # V4 PART 2 — universal representation: intent, relational context,
+    # cross-domain / modality / academia / mentor shape, fallback cleanup.
+    augment_plan(parsed, query)
     _promote_subject(parsed, query)
+    if parsed.unresolved:
+        # "my field" with no configured profile, etc. — never guessed, and it
+        # must not read as a confident interpretation (V4 PART 2 §3/§9).
+        parsed.interpretation_confidence_cap = min(parsed.interpretation_confidence_cap, 0.55)
     summary, confidence = build_summary(parsed, query)
     parsed.interpretation_summary = summary
     # a cap set by validate_and_repair (unrepaired OR/NOT mismatch, V4 §9) must

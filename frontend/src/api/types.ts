@@ -151,7 +151,17 @@ export interface SearchResponse {
       concept?: string | null;
       weight: number;
       required: boolean;
+      // V4 PART 2 §5 — "certain" (default) vs "possible" ("might have X")
+      modality?: "certain" | "possible";
     }>;
+    context?: Record<string, string>;
+    // V4 PART 2 §3 — the mentee / searcher a candidate must be able to help.
+    // Never a search phrase.
+    target_person_context?: Record<string, string>;
+    // context keys the interpreter refused to guess (e.g. "field" for "my field")
+    unresolved?: string[];
+    interpretation_summary?: string;
+    interpretation_confidence?: number;
   };
   connections: {
     total_candidates: number;

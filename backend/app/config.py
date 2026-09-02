@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     #: (V4 §7) — a low-confidence TRUE cannot produce an EXACT_MATCH
     company_category_confidence_min: float = 0.6
 
+    # ── Current-user profile context (V4 PART 2 §3) ──────────
+    #: Used ONLY to resolve relational queries like "anyone in my field" /
+    #: "a mentor in my space". Left empty by default: when a query says "my
+    #: field" and this is blank, the interpreter marks the field UNRESOLVED and
+    #: lowers confidence — it never guesses the searcher's field.
+    user_field: str = ""
+    user_current_role: str = ""
+    user_goal: str = ""
+
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     log_level: str = "INFO"
