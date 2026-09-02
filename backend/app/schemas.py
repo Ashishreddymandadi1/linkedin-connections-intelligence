@@ -151,14 +151,20 @@ def _coerce_str_list(v):
 
 
 class SemanticAssertion(BaseModel):
-    """One derived professional-concept assertion (spec §7). Provenance-tagged,
-    never presented as a verified LinkedIn fact."""
+    """One derived professional-concept assertion (spec §7, V4 §13). Provenance-
+    tagged, never presented as a verified LinkedIn fact. Links back to the
+    normalized rows it was derived from (source IDs beat matching evidence text)."""
 
     concept: str
     category: str = "industry_experience"
     scope: str = "career"
     confidence: float = Field(ge=0.0, le=1.0, default=0.6)
     evidence: list[str] = []
+    #: normalized row ids this assertion is grounded in (V4 §13) — validated in
+    #: semantic_llm._ground(); invalid ids are dropped, never trusted.
+    experience_ids: list[str] = []
+    education_ids: list[str] = []
+    certification_ids: list[str] = []
 
     @field_validator("concept")
     @classmethod
@@ -167,10 +173,32 @@ class SemanticAssertion(BaseModel):
             raise ValueError("concept must be non-empty")
         return v.strip()
 
-    @field_validator("evidence", mode="before")
-    @classmethod
-    def _coerce_evidence(cls, v):
-        return _coerce_str_list(v)
+    _norm_ids = field_validator(
+        "evidence", "experience_ids", "education_ids", "certification_ids", mode="before",
+    )(staticmethod(_coerce_str_list))
+
+
+class ExperienceSemantic(BaseModel):
+    """Meaning of ONE work experience (V4 §10/§11). Role function is tracked
+    separately from employer industry so "Accountant at Google" and "Software
+    Engineer at JPMorgan" behave differently per query."""
+
+    experience_id: str
+    role_function: str | None = None          # "software engineering", "accounting"
+    professional_domain: str | None = None    # "software systems", "finance"
+    role_domains: list[str] = []
+    role_seniority: str | None = None
+    employer_industries: list[str] = []       # "technology", "financial services"
+    employer_categories: list[str] = []       # "big tech", "large bank" (advisory; company_intel is authoritative)
+    leadership_signals: list[str] = []
+    mentoring_signals: list[str] = []
+    founder_signals: list[str] = []
+    confidence: float = Field(ge=0.0, le=1.0, default=0.6)
+
+    _norm_lists = field_validator(
+        "role_domains", "employer_industries", "employer_categories",
+        "leadership_signals", "mentoring_signals", "founder_signals", mode="before",
+    )(staticmethod(_coerce_str_list))
 
 
 class ProfileSemanticData(BaseModel):
@@ -194,6 +222,8 @@ class ProfileSemanticData(BaseModel):
     #: facts. Each keeps its own evidence + confidence so provenance survives
     #: into search results.
     semantic_assertions: list["SemanticAssertion"] = []
+    #: per-experience meaning (V4 §10) — role function vs employer industry, etc.
+    experience_semantics: list["ExperienceSemantic"] = []
 
     _norm_lists = field_validator(
         "job_families",
@@ -235,6 +265,14 @@ class ProfileSemanticData(BaseModel):
             elif isinstance(item, str) and item.strip():
                 out.append({"concept": item.strip(), "evidence": []})
         return out
+
+    @field_validator("experience_semantics", mode="before")
+    @classmethod
+    def _coerce_exp_sem(cls, v):
+        if not v:
+            return []
+        return [item for item in (v if isinstance(v, list) else [v])
+                if isinstance(item, dict) and item.get("experience_id")]
 
     @field_validator("years_of_experience", mode="before")
     @classmethod

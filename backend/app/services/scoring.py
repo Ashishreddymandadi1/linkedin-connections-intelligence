@@ -31,6 +31,7 @@ from app.config import settings
 from app.constants import CriterionType, Operator, Scope, SkillSource, TriState
 from app.models import Person
 from app.schemas import EvidenceItem, ParsedSearchQuery, ScoreComponent, SearchCriterion
+from app.services import career_chronology as _career
 from app.services.company_intel import company_key
 from app.services.geo import expand_values, location_matches
 from app.services.matching import (
@@ -418,8 +419,32 @@ def _score_semantic_concept(
         return 0.0, [], TriState.UNKNOWN
     sem = facts.semantic
 
-    # 1. a matching semantic assertion (strongest — LLM-derived + evidence)
     best_strength, best_ev, best_status = 0.0, [], TriState.UNKNOWN
+
+    # 0. experience-level semantics (V4 §29 — most specific, scope-aware). For a
+    #    ROLE_FUNCTION criterion match role_function/professional_domain/role_domains;
+    #    for INDUSTRY_EXPERIENCE match employer_industries.
+    want_industry = crit.type == CriterionType.INDUSTRY_EXPERIENCE
+    exp_sem = _career.exp_semantics_by_id(sem)
+    if exp_sem:
+        for es in exp_sem.values():
+            fields = (["employer_industries", "employer_categories"] if want_industry
+                      else ["role_function", "professional_domain", "role_domains"])
+            hit = 0.0
+            for f in fields:
+                v = es.get(f)
+                for item in ([v] if isinstance(v, str) else (v or [])):
+                    hit = max(hit, concept_overlap(str(item), concept))
+            if hit >= 0.55:
+                strength = min(0.9, 0.55 + hit * 0.35) * (0.6 + 0.4 * float(es.get("confidence", 0.6)))
+                if strength > best_strength:
+                    best_strength, best_status = strength, TriState.TRUE
+                    best_ev = [EvidenceItem(type="semantic",
+                                            text=f"{'industry' if want_industry else 'role'}: "
+                                                 f"{es.get('role_function') or (es.get('employer_industries') or ['?'])[0]}",
+                                            detail={"experience_id": es.get("experience_id"), "inferred": True})]
+
+    # 1. a matching semantic assertion (strong — LLM-derived + evidence + source ids)
     for a in sem.get("semantic_assertions", []):
         if not isinstance(a, dict):
             continue
@@ -446,8 +471,13 @@ def _score_semantic_concept(
                         EvidenceItem(type="semantic", text=f"{label}: {v}", detail={"inferred": True})
                     ], TriState.TRUE
 
-    # 3. concept-vs-career cross-encoder (criterion-level, not whole query, spec §26)
-    if best_strength < 0.6 and settings.reranker_enabled:
+    # 3. concept-vs-career cross-encoder (criterion-level, not whole query, spec §26).
+    #    Skipped for role_function / industry_experience when we HAVE experience-
+    #    level semantics: structured role vs industry data is authoritative there,
+    #    and a fuzzy similarity must not turn a clean "no" into a maybe (V4 §H.5).
+    _structured_authoritative = bool(exp_sem) and crit.type in (
+        CriterionType.ROLE_FUNCTION, CriterionType.INDUSTRY_EXPERIENCE)
+    if best_strength < 0.6 and settings.reranker_enabled and not _structured_authoritative:
         try:
             from app.services.reranker import cross_encode
 

@@ -36,8 +36,11 @@ def build_compact_profile(db: Session, person: Person) -> dict:
             "title": person.current_title,
             "company": person.current_company,
         },
+        # experience_id is the stable normalized-row id — semantic output points
+        # back to it (V4 §9), never to duplicable evidence text.
         "experience": [
             {
+                "experience_id": e.id,
                 "title": e.position,
                 "company": e.company_name,
                 "start_year": e.start_year,
@@ -52,6 +55,7 @@ def build_compact_profile(db: Session, person: Person) -> dict:
         ],
         "education": [
             {
+                "education_id": ed.id,
                 "school": ed.school_name,
                 "degree": ed.degree,
                 "field_of_study": ed.field_of_study,
@@ -61,7 +65,9 @@ def build_compact_profile(db: Session, person: Person) -> dict:
             for ed in edus[:6]
         ],
         "explicit_skills": [s.skill_name for s in skills][:40],
-        "certifications": [c.name for c in certs if c.name][:15],
+        "certifications": [
+            {"certification_id": c.id, "name": c.name} for c in certs if c.name
+        ][:15],
         "languages": [lang.name for lang in langs if lang.name][:10],
         "publications": [p.title for p in pubs if p.title][:8],
         # evidence sources for leadership/mentorship/advising concepts (spec §8/§23)

@@ -65,6 +65,17 @@ def _exp_text(e) -> str:
                f"{getattr(e, 'description', '') or ''}")
 
 
+def exp_semantics_by_id(sem: dict | None) -> dict:
+    """Map experience_id -> its ExperienceSemantic dict, from stored profile data."""
+    if not isinstance(sem, dict):
+        return {}
+    cached = sem.get("experience_semantics_by_id")
+    if isinstance(cached, dict):
+        return cached
+    return {es.get("experience_id"): es for es in sem.get("experience_semantics", [])
+            if isinstance(es, dict) and es.get("experience_id")}
+
+
 def _matches_concept(e, concept: str, sem_by_exp: dict | None = None) -> float:
     concept = concept.strip().lower()
     best = concept_overlap(_exp_text(e), concept)
@@ -86,7 +97,7 @@ def score_transition(facts, crit: SearchCriterion) -> tuple[float, list[Evidence
     if not m:
         return 0.0, [], TriState.UNKNOWN
     frm, to = m.group(1).strip(), m.group(2).strip()
-    sem_by_exp = (facts.semantic or {}).get("experience_semantics_by_id") if isinstance(facts.semantic, dict) else None
+    sem_by_exp = exp_semantics_by_id(facts.semantic)
     exps = ordered_experiences(facts.experiences)
     if len(exps) < 2:
         return 0.0, [], TriState.UNKNOWN
@@ -119,7 +130,7 @@ def score_years_experience(facts, crit: SearchCriterion) -> tuple[float, list[Ev
         return 0.0, [], TriState.UNKNOWN
     dom_m = re.search(r"\bin\s+(.+)$", crit.concept or "")
     domain = dom_m.group(1).strip() if dom_m else ""
-    sem_by_exp = (facts.semantic or {}).get("experience_semantics_by_id") if isinstance(facts.semantic, dict) else None
+    sem_by_exp = exp_semantics_by_id(facts.semantic)
 
     if domain:
         def pred(e):

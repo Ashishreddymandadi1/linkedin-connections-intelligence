@@ -108,6 +108,19 @@ def build_search_text(db: Session, person: Person) -> str:
             concept = assertion.get("concept") if isinstance(assertion, dict) else None
             if concept:
                 parts.append(concept + ".")
+        # experience-level meaning (V4 §17) — role functions kept distinct from
+        # employer industries in the embedding document too
+        roles, inds = [], []
+        for es in (d.get("experience_semantics") or [])[:14]:
+            if not isinstance(es, dict):
+                continue
+            if es.get("role_function"):
+                roles.append(es["role_function"])
+            inds.extend(es.get("employer_industries") or [])
+        if roles:
+            parts.append("Roles held: " + ", ".join(dict.fromkeys(roles)) + ".")
+        if inds:
+            parts.append("Employer industries: " + ", ".join(dict.fromkeys(inds)) + ".")
         extra = list(dict.fromkeys([*(d.get("technical_domains") or []), *(d.get("searchable_keywords") or [])]))[:20]
         if extra:
             parts.append("Also: " + ", ".join(extra) + ".")
