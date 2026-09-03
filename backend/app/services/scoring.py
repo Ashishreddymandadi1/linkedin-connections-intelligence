@@ -715,20 +715,11 @@ def _score_one(
 
 
 #: structured fact types where a required NOT must be tri-state, not "absent
-#: data == satisfied" (V4 PART 3.5 §3).
+#: data == satisfied" (V4 PART 3.5 §3 / PART 3.6 §3).
 _NOT_TRISTATE_TYPES = {
     CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY,
     CriterionType.LOCATION, CriterionType.EDUCATION,
 }
-#: profile_completeness at/above which a NOT past-company / NOT school can be
-#: called TRUE from absence alone.
-_NOT_ABSENCE_COMPLETENESS = 70
-
-
-def _current_employer_known(facts: ProfileFacts) -> bool:
-    return bool(facts.person.current_company) or any(
-        getattr(e, "is_current", False) for e in facts.experiences
-    )
 
 
 def _score_structured_not(
@@ -736,9 +727,19 @@ def _score_structured_not(
 ) -> tuple[float, list[EvidenceItem], str]:
     """Tri-state NOT for a verified structured fact:
       excluded value verifiably PRESENT (in scope)  -> FALSE
-      verifiably ABSENT + the relevant section is reliable -> TRUE
-      section unknown / not reliable                 -> UNKNOWN
+      verifiably ABSENT + the relevant section is backend-authoritative -> TRUE
+      section unknown / not authoritative           -> UNKNOWN
+
+    Section authority is the SHARED ``profile_authority`` policy — a NOT past
+    company and the hard gate use the exact same rule (V4 PART 3.6 §3).
     """
+    from app.services.profile_authority import (
+        current_employer_known,
+        education_history_authoritative,
+        location_known,
+        work_history_authoritative,
+    )
+
     vals = [v for v in (crit.values or ([crit.value] if crit.value else [])) if v]
 
     if crit.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY):
@@ -751,28 +752,22 @@ def _score_structured_not(
         if present >= _REQUIRED_MIN:
             return 0.0, [EvidenceItem(type="experience",
                                       text=f"is at an excluded company ({' / '.join(vals)})", detail={})], TriState.FALSE
-        if crit.type == CriterionType.CURRENT_COMPANY:
-            reliable = _current_employer_known(facts)
-        else:  # NOT previously at X — trust absence only with a strongly-complete history
-            reliable = (bool(facts.experiences)
-                        and (facts.person.profile_completeness or 0) >= _NOT_ABSENCE_COMPLETENESS
-                        and all(getattr(e, "start_year", None) for e in facts.experiences))
+        reliable = (current_employer_known(facts) if crit.type == CriterionType.CURRENT_COMPANY
+                    else work_history_authoritative(facts))
         return _not_true_or_unknown(reliable, f"no excluded-company ({' / '.join(vals)}) role")
 
     if crit.type == CriterionType.LOCATION:
         present = max((_score_location(facts, v)[0] for v in vals), default=0.0)
         if present >= _REQUIRED_MIN:
             return 0.0, [EvidenceItem(type="location", text="located in an excluded place", detail={})], TriState.FALSE
-        p = facts.person
-        reliable = bool(p.location_text or getattr(p, "city", None) or getattr(p, "state", None))
-        return _not_true_or_unknown(reliable, "location is not an excluded place")
+        return _not_true_or_unknown(location_known(facts), "location is not an excluded place")
 
     # EDUCATION
     present = max((_score_education(facts, v)[0] for v in vals), default=0.0)
     if present >= _REQUIRED_MIN:
         return 0.0, [EvidenceItem(type="education", text="attended an excluded school", detail={})], TriState.FALSE
-    reliable = bool(facts.education) and (facts.person.profile_completeness or 0) >= _NOT_ABSENCE_COMPLETENESS
-    return _not_true_or_unknown(reliable, "no excluded school in the education history")
+    return _not_true_or_unknown(education_history_authoritative(facts),
+                                "no excluded school in the education history")
 
 
 def _not_true_or_unknown(reliable: bool, true_text: str) -> tuple[float, list[EvidenceItem], str]:

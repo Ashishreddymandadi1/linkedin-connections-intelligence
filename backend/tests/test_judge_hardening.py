@@ -74,22 +74,46 @@ def test_semantic_false_with_incomplete_profile_downgrades_to_unknown():
     assert out["m"]["status"] == TriState.UNKNOWN
 
 
-def test_semantic_false_with_valid_contradiction_stays_false():
-    pkt = _packet_min()
-    pkt["past"] = [{"experience_id": "e2", "title": "IC only", "company": "Co", "is_current": False}]
-    raw = {"m": {"criterion_id": "m", "status": "false", "match_strength": 0.2,
-                 "supporting_evidence_refs": [], "contradicting_evidence_refs": ["exp:e2"],
-                 "reason": "every role is a pure individual-contributor position with no reports"}}
-    out = validate_person(raw, pkt, _plan(_mentor_crit()),
-                          _pf(_Person(), [_Exp("SWE", "Co", 2018, 2021, False, id="e2")]), ScoringContext())
-    assert out["m"]["status"] == TriState.FALSE
+def test_current_scoped_false_with_a_valid_current_contradiction_stays_false():
+    crit = _crit(id="r", type=CriterionType.ROLE_FUNCTION, concept="software engineering",
+                 scope=Scope.CURRENT, required=True)
+    pkt = {"person_id": "p0",
+           "current": {"experience_id": "e1", "title": "Product Manager", "company": "Co", "is_current": True},
+           "past": [], "education": [], "experience_semantics": [], "company_classifications": [],
+           "skills": [], "certifications": [], "semantic_assertions": []}
+    facts = _pf(_Person(current_title="Product Manager"),
+                [_Exp("Product Manager", "Co", 2021, None, True, id="e1")])
+    raw = {"r": {"criterion_id": "r", "status": "false", "match_strength": 0.1,
+                 "supporting_evidence_refs": [], "contradicting_evidence_refs": ["exp:e1"],
+                 "reason": "current role is Product Manager, not software engineering"}}
+    out = validate_person(raw, pkt, _plan(crit), facts, ScoringContext())
+    assert out["r"]["status"] == TriState.FALSE
 
 
-def test_semantic_false_with_explicit_complete_data_negative_stays_false():
-    raw = {"m": {"criterion_id": "m", "status": "false", "match_strength": 0.2,
-                 "supporting_evidence_refs": [], "contradicting_evidence_refs": [],
-                 "reason": "reviewed the full work history and it clearly lacks any people-management role"}}
-    out = validate_person(raw, _packet_min(), _plan(_mentor_crit()), _facts_plain(), ScoringContext())
+def test_explicit_complete_phrase_needs_backend_authoritative_history():
+    # §10 — thin profile: the model's "reviewed the full history" is worthless
+    thin = validate_person(
+        {"m": {"criterion_id": "m", "status": "false", "match_strength": 0.2,
+               "supporting_evidence_refs": [], "contradicting_evidence_refs": [],
+               "reason": "reviewed the full work history and it clearly lacks any people-management role"}},
+        _packet_min(), _plan(_mentor_crit()), _facts_plain(), ScoringContext())
+    assert thin["m"]["status"] == TriState.UNKNOWN
+
+    # §11 — >=3 dated roles + completeness 75: an absence-based negative may stand
+    p = _Person(completeness=75)
+    strong = _pf(p, [_Exp("SWE", "A", 2014, 2017, False, id="e1"),
+                     _Exp("SWE", "B", 2017, 2020, False, id="e2"),
+                     _Exp("Staff SWE", "C", 2020, None, True, id="e3")])
+    pkt = {"person_id": p.id, "current": {"experience_id": "e3", "is_current": True},
+           "past": [{"experience_id": "e1", "is_current": False},
+                    {"experience_id": "e2", "is_current": False}],
+           "education": [], "experience_semantics": [], "company_classifications": [],
+           "skills": [], "certifications": [], "semantic_assertions": []}
+    out = validate_person(
+        {"m": {"criterion_id": "m", "status": "false", "match_strength": 0.2,
+               "supporting_evidence_refs": [], "contradicting_evidence_refs": [],
+               "reason": "reviewed every role in the full work history — none show people management or mentoring"}},
+        pkt, _plan(_mentor_crit()), strong, ScoringContext())
     assert out["m"]["status"] == TriState.FALSE
 
 

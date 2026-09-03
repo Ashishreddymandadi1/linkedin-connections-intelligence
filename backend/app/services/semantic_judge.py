@@ -88,6 +88,8 @@ class JudgeMetadata:
     cap_limit: int = 0
     omitted_people: int = 0
     omitted_criteria: int = 0
+    #: packets too large for a single batch — left unjudged (subset of omitted_people)
+    oversized_packets: int = 0
     judgeable_criteria: list[str] = field(default_factory=list)
     providers: dict[str, int] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
@@ -109,6 +111,7 @@ class JudgeMetadata:
             "cap_limit": self.cap_limit,
             "omitted_people": self.omitted_people,
             "omitted_criteria": self.omitted_criteria,
+            "oversized_packets": self.oversized_packets,
             "judgeable_criteria": self.judgeable_criteria,
             "providers": self.providers,
             "models": self.models,
@@ -173,8 +176,12 @@ def run_judge(
     meta.judge_candidate_count = len(packets)
 
     payload = plan_payload(query, parsed, jcrits)
-    batches = _make_batches(packets)
+    batches, oversized = _make_batches(packets)
     meta.judge_batch_count = len(batches)
+    meta.oversized_packets = len(oversized)
+    if oversized:
+        log.warning("judge: %d packet(s) too large for a batch — left unjudged: %s",
+                    len(oversized), oversized[:10])
 
     verdicts: dict[str, dict[str, dict]] = {}
     for batch in batches:
@@ -213,14 +220,27 @@ def run_judge(
 # ─────────────────────── batching ───────────────────────
 
 
-def _make_batches(packets: list[dict]) -> list[list[dict]]:
+def _pkt_chars(pkt: dict) -> int:
+    return len(json.dumps(pkt, ensure_ascii=False, default=str))
+
+
+def _make_batches(packets: list[dict]) -> tuple[list[list[dict]], list[str]]:
+    """Pack packets into ``<= semantic_judge_batch_size`` / ``<= max_batch_chars``
+    batches. A single packet that itself exceeds ``max_batch_chars`` (or was
+    flagged ``_packet_too_large``) is NEVER placed in a batch — it would create
+    an oversized provider request. Its person_id is returned as ``oversized`` and
+    the candidate is left unjudged / UNKNOWN, status PARTIAL (V4 PART 3.6 §8)."""
     size = max(1, settings.semantic_judge_batch_size)
     max_chars = max(2000, settings.semantic_judge_max_batch_chars)
     batches: list[list[dict]] = []
+    oversized: list[str] = []
     cur: list[dict] = []
     cur_chars = 0
     for pkt in packets:
-        pc = len(json.dumps(pkt, ensure_ascii=False, default=str))
+        pc = _pkt_chars(pkt)
+        if pkt.get("_packet_too_large") or pc > max_chars:
+            oversized.append(pkt.get("person_id"))
+            continue
         if cur and (len(cur) >= size or cur_chars + pc > max_chars):
             batches.append(cur)
             cur, cur_chars = [], 0
@@ -228,7 +248,7 @@ def _make_batches(packets: list[dict]) -> list[list[dict]]:
         cur_chars += pc
     if cur:
         batches.append(cur)
-    return batches
+    return batches, oversized
 
 
 def _judge_batch(payload: dict, packets: list[dict]) -> tuple[JudgeBatch, str, str] | None:

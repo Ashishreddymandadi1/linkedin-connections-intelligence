@@ -271,37 +271,89 @@ def _one_packet(person, facts: ProfileFacts, extras: dict, ctx: ScoringContext, 
     return _fit_size(packet)
 
 
+def _size(packet: dict) -> int:
+    return len(json.dumps(packet, ensure_ascii=False, default=str))
+
+
 def _fit_size(packet: dict) -> dict:
-    """Trim progressively so one packet stays under the char budget (§34) —
-    least-critical evidence first, never past-role identity or classifications."""
+    """HARD-ENFORCE the per-packet char budget (V4 PART 3.6 §7).
+
+    Progressive trimming, least-critical evidence first. On return the invariant
+    ``_size(packet) <= semantic_judge_max_packet_chars`` HOLDS (unless the cap is
+    <= 0). If the mandatory-minimum packet still cannot fit, ``_packet_too_large``
+    is set and the candidate is left unjudged rather than an oversized request
+    being sent (§8).
+
+    NEVER removed: person_id, current-role identity, company classifications
+    relevant to the query, and the evidence refs of any retained evidence."""
     cap = settings.semantic_judge_max_packet_chars
     if cap <= 0 or _size(packet) <= cap:
         return packet
 
-    packet["recommendations_received"] = []
-    for v in packet.get("volunteering", []):
-        v.pop("description", None)
-    if _size(packet) <= cap:
-        packet["_truncated"] = True
-        return packet
+    def done() -> bool:
+        return _size(packet) <= cap
 
-    for e in packet.get("past", []):
-        if e.get("description") and len(e["description"]) > 160:
-            e["description"] = e["description"][:160]
-    if _size(packet) <= cap:
-        packet["_truncated"] = True
-        return packet
+    #: each stage trims the least-critical evidence first; return as soon as the
+    #: packet fits. Ordered per V4 PART 3.6 §7.
+    stages = [
+        lambda: _trunc_recs(packet, 120),
+        lambda: packet.__setitem__("recommendations_received", []),
+        lambda: [v.pop("description", None) for v in packet.get("volunteering", [])],
+        lambda: [e.update(description=(e["description"][:160])) for e in packet.get("past", []) if e.get("description")],
+        lambda: [a.__setitem__("evidence", []) for a in packet.get("semantic_assertions", [])],
+        lambda: [p.pop("description", None) for p in packet.get("publications", []) if isinstance(p, dict)],
+        lambda: _cap_lists(packet, skills=8, certifications=5, publications=4,
+                           semantic_assertions=6, experience_semantics=6),
+        lambda: (packet.__setitem__("career_summary", (packet.get("career_summary") or "")[:200] or None)),
+        lambda: _cap_lists(packet, skills=3, certifications=2, publications=1,
+                           semantic_assertions=2, experience_semantics=2, education=2),
+        lambda: [e.pop("description", None) for e in packet.get("past", [])],
+        lambda: _drop_past_to(packet, 2),
+        lambda: (packet.__setitem__("career_summary", None), packet.pop("headline", None),
+                 packet.pop("location", None), packet.pop("volunteering", None)),
+        lambda: _cap_lists(packet, skills=0, certifications=0, publications=0,
+                           semantic_assertions=0, experience_semantics=0, education=0),
+        lambda: _drop_past_to(packet, 0),
+        lambda: _minimise_current(packet),
+    ]
+    for step in stages:
+        step()
+        if done():
+            return _mark(packet)
 
-    while len(packet.get("past", [])) > 3 and _size(packet) > cap:
-        packet["past"].pop()
-    for a in packet.get("semantic_assertions", []):
-        a["evidence"] = a.get("evidence", [])[:1]
+    # mandatory minimum (person_id + current identity + company classifications)
+    # still does not fit — do NOT exceed the cap silently (§8)
+    packet["_packet_too_large"] = True
+    return _mark(packet)
+
+
+def _mark(packet: dict) -> dict:
     packet["_truncated"] = True
     return packet
 
 
-def _size(packet: dict) -> int:
-    return len(json.dumps(packet, ensure_ascii=False, default=str))
+def _trunc_recs(packet: dict, n: int) -> None:
+    for r in packet.get("recommendations_received", []):
+        if isinstance(r, dict):
+            r["text"] = (r.get("text") or "")[:n]
+
+
+def _cap_lists(packet: dict, **limits: int) -> None:
+    for key, n in limits.items():
+        if key in packet and isinstance(packet[key], list):
+            packet[key] = packet[key][:n]
+
+
+def _drop_past_to(packet: dict, keep: int) -> None:
+    past = packet.get("past")
+    if isinstance(past, list) and len(past) > keep:
+        packet["past"] = past[:keep]
+
+
+def _minimise_current(packet: dict) -> None:
+    cur = packet.get("current")
+    if isinstance(cur, dict):
+        packet["current"] = {k: cur.get(k) for k in ("ref", "experience_id", "title", "company", "is_current")}
 
 
 def plan_payload(query: str, parsed: ParsedSearchQuery, judge_crits: list) -> dict:

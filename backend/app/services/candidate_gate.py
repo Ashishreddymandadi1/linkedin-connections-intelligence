@@ -31,6 +31,12 @@ from dataclasses import dataclass, field
 from app.constants import CriterionType, Modality, Operator, TriState
 from app.schemas import ParsedSearchQuery, SearchCriterion
 from app.services import career_chronology as _career
+from app.services.profile_authority import (
+    current_employer_known,
+    education_history_authoritative,
+    location_known,
+    work_history_authoritative,
+)
 from app.services.scoring import (
     ProfileFacts,
     ScoringContext,
@@ -41,22 +47,9 @@ from app.services.scoring import (
     _want_current_for,
 )
 
-#: V4 PART 3.5 §4 — a MISSING required past employer / school is treated as an
-#: authoritative negative (safe to hard-reject before the judge) ONLY when the
-#: section is *strongly* complete. Anything short of this keeps the candidate
-#: VIABLE and lets the exhaustive judge look. Old, undated experience is exactly
-#: the false-negative risk this guards against.
-#:
-#:   past company absence is authoritative iff:
-#:     - profile_completeness >= 70, AND
-#:     - >= 3 work experiences, AND
-#:     - EVERY work experience has a start year (no undated gap in the history)
-#:
-#:   school absence is authoritative iff:
-#:     - profile_completeness >= 70, AND
-#:     - at least one education row is present
-_STRONG_COMPLETENESS = 70
-_MIN_ROLES_FOR_ABSENCE = 3
+# V4 PART 3.6 §2 — completeness / authority policy is centralised in
+# ``profile_authority``; the gate hard-rejects a MISSING required past employer
+# / school ONLY when that module says the section is authoritative.
 
 
 @dataclass
@@ -87,7 +80,7 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
             if _location_strength(facts, crit) > 0:
                 statuses[crit.id] = TriState.TRUE
                 locked[crit.id] = {"status": TriState.TRUE, "detail": "verified location match"}
-            elif _has_location(facts):
+            elif location_known(facts):
                 return _reject(pid, crit,
                                f"verified location {facts.person.location_text!r} does not match "
                                f"required {crit.values or [crit.value]}", statuses, locked)
@@ -105,7 +98,7 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
                                    f"verifiably still at excluded company {crit.values or [crit.value]}",
                                    statuses, locked)
                 # absence of DATA is not proof of NOT (V4 PART 3.5 §3)
-                if _has_current_employer(facts):
+                if current_employer_known(facts):
                     statuses[crit.id] = TriState.TRUE
                     locked[crit.id] = {"status": TriState.TRUE,
                                        "detail": "current employer verified, not the excluded one"}
@@ -115,7 +108,7 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
             if matched > 0:
                 statuses[crit.id] = TriState.TRUE
                 locked[crit.id] = {"status": TriState.TRUE, "detail": "verified current employer"}
-            elif want is True and _has_current_employer(facts):
+            elif want is True and current_employer_known(facts):
                 return _reject(pid, crit,
                                f"current employer {facts.person.current_company!r} is not "
                                f"{crit.values or [crit.value]}", statuses, locked)
@@ -129,7 +122,7 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
             if _company_strength(facts, crit, want_current=want, ctx=ctx) > 0:
                 statuses[crit.id] = TriState.TRUE
                 locked[crit.id] = {"status": TriState.TRUE, "detail": "verified in work history"}
-            elif _history_is_authoritative(facts):
+            elif work_history_authoritative(facts):
                 return _reject(pid, crit,
                                f"no {crit.values or [crit.value]} role in a strongly-complete, "
                                f"fully-dated work history", statuses, locked)
@@ -141,7 +134,7 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
         if crit.type == CriterionType.EDUCATION and crit.operator != Operator.NOT:
             if _education_strength(facts, crit) > 0:
                 statuses[crit.id] = TriState.TRUE
-            elif _education_is_authoritative(facts):
+            elif education_history_authoritative(facts):
                 return _reject(pid, crit,
                                f"{crit.values or [crit.value]} absent from a strongly-complete "
                                f"education history", statuses, locked)
@@ -187,36 +180,6 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
         # a hard-fact rejection — the judge / final rescore decides those.
 
     return ViabilityDecision(person_id=pid, viable=True, hard_fact_statuses=statuses, locked_facts=locked)
-
-
-# ─────────────────────── data-completeness helpers ───────────────────────
-
-
-def _history_is_authoritative(facts: ProfileFacts) -> bool:
-    """True only when the work history is strongly complete enough to treat a
-    MISSING employer as a real negative (V4 PART 3.5 §4)."""
-    exps = facts.experiences
-    if len(exps) < _MIN_ROLES_FOR_ABSENCE:
-        return False
-    if (facts.person.profile_completeness or 0) < _STRONG_COMPLETENESS:
-        return False
-    # any undated role => we can't be sure what the person did in that gap
-    return all(getattr(e, "start_year", None) for e in exps)
-
-
-def _education_is_authoritative(facts: ProfileFacts) -> bool:
-    return bool(facts.education) and (facts.person.profile_completeness or 0) >= _STRONG_COMPLETENESS
-
-
-def _has_current_employer(facts: ProfileFacts) -> bool:
-    return bool(facts.person.current_company) or any(
-        getattr(e, "is_current", False) for e in facts.experiences
-    )
-
-
-def _has_location(facts: ProfileFacts) -> bool:
-    p = facts.person
-    return bool(p.location_text or getattr(p, "city", None) or getattr(p, "state", None))
 
 
 # ─────────────────────── deterministic-scorer wrappers ───────────────────────

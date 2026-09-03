@@ -192,6 +192,8 @@ export interface SearchResponse {
     capped: boolean;
     omitted_people: number;
     omitted_criteria: number;
+    // V4 PART 3.6 §8 — packets too large to judge (subset of omitted_people)
+    oversized_packets?: number;
     providers: Record<string, number>;
     models: string[];
   } | null;
