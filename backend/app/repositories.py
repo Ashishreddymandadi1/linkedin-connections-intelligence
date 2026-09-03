@@ -29,6 +29,7 @@ from app.models import (
     Recommendation,
     SearchQuery,
     SearchResult,
+    SearchRunState,
     Skill,
     Volunteering,
 )
@@ -70,6 +71,7 @@ def delete_dataset(db: Session, dataset_id: str) -> bool:
     person_ids = list(db.scalars(select(Person.id).where(Person.dataset_id == dataset_id)))
     search_ids = list(db.scalars(select(SearchQuery.id).where(SearchQuery.dataset_id == dataset_id)))
     if search_ids:
+        db.execute(delete(SearchRunState).where(SearchRunState.search_id.in_(search_ids)))
         db.execute(delete(SearchResult).where(SearchResult.search_id.in_(search_ids)))
     db.execute(delete(SearchQuery).where(SearchQuery.dataset_id == dataset_id))
     if person_ids:
@@ -373,6 +375,28 @@ def get_search_results(db: Session, search_id: str) -> list[SearchResult]:
             select(SearchResult).where(SearchResult.search_id == search_id).order_by(SearchResult.rank)
         )
     )
+
+
+def upsert_search_run_state(db: Session, search_id: str, **fields) -> SearchRunState:
+    """One row per search — the FINAL validated response-level snapshot (V4 PART 7)."""
+    existing = db.scalars(
+        select(SearchRunState).where(SearchRunState.search_id == search_id)
+    ).first()
+    if existing:
+        for k, v in fields.items():
+            setattr(existing, k, v)
+        db.flush()
+        return existing
+    row = SearchRunState(search_id=search_id, **fields)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def get_search_run_state(db: Session, search_id: str) -> SearchRunState | None:
+    return db.scalars(
+        select(SearchRunState).where(SearchRunState.search_id == search_id)
+    ).first()
 
 
 # ─────────────────── company intelligence (spec §4) ───────────────────

@@ -50,6 +50,10 @@ from app.services.semantic_judge import run_judge
 
 log = logging.getLogger("app.search")
 
+#: stored-response format version (V4 PART 7 §9). Bump when the persisted snapshot
+#: shape changes; ``load_search`` can then branch on ``SearchRunState.response_version``.
+RESPONSE_VERSION = 1
+
 
 def _tier_key(s):
     """Rank by qualification tier FIRST, then match score (V4 §25)."""
@@ -210,7 +214,35 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         if cand.person.id in seen_near or len(near_items) >= 5:
             continue
         seen_near.add(cand.person.id)
-        near_items.append(_to_result_item(db, i, cand, parsed, query, use_llm_reason=False))
+        item = _to_result_item(db, len(near_items) + 1, cand, parsed, query, use_llm_reason=False)
+        near_items.append(item)
+        # near matches persist in their OWN bucket — same schema, qualification
+        # stays not_match, never mixed into the main results (V4 PART 7 §4).
+        repo.add_search_result(
+            db, search_id=sq.id, person_id=item.person_id, bucket="connection_near",
+            rank=item.rank, match_score=item.match_score, data_confidence=item.data_confidence,
+            reason=item.reason, payload=item.model_dump(),
+        )
+
+    judge_metadata = judge_run.metadata.as_dict()
+    audit_metadata = audit_run.metadata.as_dict() if audit_run else None
+
+    # FINAL validated search-level snapshot (V4 PART 7 §3) — captured here, AFTER
+    # _run_final_audit -> final_auditor.finalize(). load_search rebuilds the whole
+    # response from this row + the persisted result payloads, never re-running any
+    # LLM / embedding / judge / audit / reason step.
+    repo.upsert_search_run_state(
+        db, sq.id,
+        response_version=RESPONSE_VERSION,
+        exact_match_count=exact_n,
+        possible_match_count=possible_n,
+        returned_count=len(results),
+        near_match_count=len(near_items),
+        total_candidates=total_scored,
+        external_searched=False,
+        judge_metadata=judge_metadata,
+        audit_metadata=audit_metadata,
+    )
 
     return SearchResponse(
         search_id=sq.id,
@@ -223,28 +255,72 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         external=ExternalBucket(searched=False),
         llm_provider=provider,
         llm_model=model,
-        judge_metadata=judge_run.metadata.as_dict(),
-        audit_metadata=audit_run.metadata.as_dict() if audit_run else None,
+        judge_metadata=judge_metadata,
+        audit_metadata=audit_metadata,
     )
 
 
 def load_search(db: Session, search_id: str) -> SearchResponse | None:
+    """Reconstruct a completed search's response from persisted state ONLY.
+
+    This is a HISTORICAL SNAPSHOT (V4 PART 7 §1): it never re-runs query
+    interpretation, embeddings, the semantic judge, the final auditor, reason
+    generation, or Apify — it only reads ``search_queries`` + ``search_results``
+    + ``search_run_states``.
+    """
     sq: SearchQuery | None = repo.get_search_query(db, search_id)
     if not sq:
         return None
+
     rows = repo.get_search_results(db, search_id)
-    conn_rows = [SearchResultItem(**r.payload) for r in rows if r.bucket == "connection"]
+    # ``get_search_results`` orders by rank; filtering by bucket keeps that order.
+    main_rows = [_item_from_payload(r.payload) for r in rows if r.bucket == "connection"]
+    near_rows = [_item_from_payload(r.payload) for r in rows if r.bucket == "connection_near"]
+
+    state = repo.get_search_run_state(db, search_id)
+    if state is not None:
+        exact_n = state.exact_match_count
+        possible_n = state.possible_match_count
+        total_candidates = state.total_candidates or sq.total_candidates
+        external_searched = state.external_searched
+        judge_metadata = state.judge_metadata
+        audit_metadata = state.audit_metadata
+    else:
+        # Pre-PART-7 saved search — no snapshot row. Derive counts from the stored
+        # payload qualifications; metadata is unrecoverable, so leave it None and
+        # near_matches empty (V4 PART 7 §7).
+        exact_n = sum(1 for m in main_rows if m.qualification == Qualification.EXACT_MATCH)
+        possible_n = sum(1 for m in main_rows if m.qualification == Qualification.POSSIBLE_MATCH)
+        total_candidates = sq.total_candidates
+        external_searched = bool(sq.external_searched)
+        judge_metadata = None
+        audit_metadata = None
+
     return SearchResponse(
         search_id=sq.id,
         query=sq.query_text,
         interpreted_query=sq.interpreted_query_json or {},
         connections=ConnectionBucket(
-            total_candidates=sq.total_candidates, returned=len(conn_rows), results=conn_rows
+            total_candidates=total_candidates,
+            returned=len(main_rows),
+            results=main_rows,
+            exact_match_count=exact_n,
+            possible_match_count=possible_n,
+            near_matches=near_rows,
         ),
-        external=ExternalBucket(searched=bool(sq.external_searched)),
+        external=ExternalBucket(searched=bool(external_searched)),
         llm_provider=sq.llm_provider,
         llm_model=sq.llm_model,
+        judge_metadata=judge_metadata,
+        audit_metadata=audit_metadata,
     )
+
+
+def _item_from_payload(payload: dict) -> SearchResultItem:
+    """Tolerant rebuild of a stored result — older payloads may lack V4 fields
+    (qualification / audit / uncertainty); pydantic defaults fill those in
+    (V4 PART 7 §7)."""
+    return SearchResultItem(**(payload or {}))
 
 
 # ─────────────────────── final audit (V4 PART 5) ───────────────────────

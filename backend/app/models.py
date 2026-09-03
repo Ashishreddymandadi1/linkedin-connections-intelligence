@@ -383,10 +383,53 @@ class SearchResult(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("sr"))
     search_id: Mapped[str] = mapped_column(ForeignKey("search_queries.id", ondelete="CASCADE"), index=True)
     person_id: Mapped[str] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
-    bucket: Mapped[str] = mapped_column(String, default="connection")  # connection | external
+    #: connection | connection_near | external — near matches live in their own
+    #: bucket so ``load_search`` can rebuild ``connections.near_matches`` without
+    #: ever mixing them into the main results (V4 PART 7 §4).
+    bucket: Mapped[str] = mapped_column(String, default="connection")
     rank: Mapped[int] = mapped_column(Integer)
     match_score: Mapped[float] = mapped_column(Float)
     data_confidence: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict] = mapped_column(JSON)  # full result object as returned to the client
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class SearchRunState(Base):
+    """Search-level snapshot of one completed search (V4 PART 7).
+
+    A NEW table (never a column added to ``search_queries`` / ``search_results``)
+    so ``Base.metadata.create_all()`` can add it to an existing SQLite ``app.db``
+    with no migration framework — ``create_all`` only creates missing tables, it
+    never alters existing ones.
+
+    Holds the FINAL validated response-level metadata (captured AFTER
+    ``final_auditor.finalize()``) so ``load_search`` can rebuild the exact
+    response first returned, with zero LLM / embedding / judge / audit / reason
+    re-runs.
+    """
+
+    __tablename__ = "search_run_states"
+    __table_args__ = (UniqueConstraint("search_id", name="uq_search_run_state_search"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("srs"))
+    search_id: Mapped[str] = mapped_column(
+        ForeignKey("search_queries.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    #: stored-response format version — lets a future format change be detected
+    #: without a migration framework (V4 PART 7 §9).
+    response_version: Mapped[int] = mapped_column(Integer, default=1)
+
+    exact_match_count: Mapped[int] = mapped_column(Integer, default=0)
+    possible_match_count: Mapped[int] = mapped_column(Integer, default=0)
+    returned_count: Mapped[int] = mapped_column(Integer, default=0)
+    near_match_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_candidates: Mapped[int] = mapped_column(Integer, default=0)
+    external_searched: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    #: FINAL validated observability blocks (``JudgeMetadata.as_dict()`` /
+    #: ``AuditMetadata.as_dict()``); null when that phase did not run.
+    judge_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    audit_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

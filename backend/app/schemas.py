@@ -738,6 +738,7 @@ class SearchResponse(BaseModel):
     #: absent on searches that did not run the judge.
     judge_metadata: dict[str, Any] | None = None
     #: V4 PART 5 §25 — optional observability block for the final result audit
-    #: (enabled, status, pool/batch counts, decision tally, providers).
-    #: Live-response only for now — persistence is PART 7-9.
+    #: (enabled, status, pool/batch counts, decision tally, providers). Persisted
+    #: post-``finalize()`` in ``search_run_states`` and rebuilt by ``load_search``
+    #: (V4 PART 7).
     audit_metadata: dict[str, Any] | None = None
