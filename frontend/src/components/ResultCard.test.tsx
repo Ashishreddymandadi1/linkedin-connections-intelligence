@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { ResultCard } from "./ResultCard";
 import type { SearchResultItem } from "../api/types";
 
-const item: SearchResultItem = {
+const base: SearchResultItem = {
   rank: 1,
   person_id: "p1",
   name: "Jane Smith",
@@ -16,6 +16,9 @@ const item: SearchResultItem = {
   match_score: 94,
   data_confidence: 78,
   reason: "Jane previously worked at Amazon and lists AWS on her profile.",
+  qualification: "exact_match",
+  uncertain_criteria: [],
+  unmet_criteria: [],
   matched_criteria: ["Amazon", "AWS"],
   score_breakdown: [
     {
@@ -48,17 +51,20 @@ const item: SearchResultItem = {
   relevant_education: [],
 };
 
+function make(over: Partial<SearchResultItem>): SearchResultItem {
+  return { ...base, ...over };
+}
+
 describe("ResultCard", () => {
   it("shows match score and data confidence as distinct numbers", () => {
-    render(<ResultCard item={item} />);
+    render(<ResultCard item={base} />);
     expect(screen.getByText("Jane Smith")).toBeInTheDocument();
     expect(screen.getByText("Connection")).toBeInTheDocument();
-    // collapsed header shows the match meter
     expect(screen.getAllByText("94").length).toBeGreaterThan(0);
   });
 
   it("expands to reveal score breakdown, evidence and fact/inference badges", () => {
-    render(<ResultCard item={item} />);
+    render(<ResultCard item={base} />);
     fireEvent.click(screen.getByText("Jane Smith"));
 
     expect(screen.getByText(/previously worked at Amazon/i)).toBeInTheDocument();
@@ -67,12 +73,55 @@ describe("ResultCard", () => {
     expect(screen.getByText("34/40")).toBeInTheDocument();
     expect(screen.getByText("94/100")).toBeInTheDocument();
 
-    // both confidence and match meters present when expanded
     expect(screen.getByText("Data confidence")).toBeInTheDocument();
     expect(screen.getByText("78")).toBeInTheDocument();
 
-    // fact vs inference distinction
     expect(screen.getByText("LinkedIn data")).toBeInTheDocument();
     expect(screen.getByText("AI inferred")).toBeInTheDocument();
+  });
+
+  it("shows an Exact match badge for an exact candidate", () => {
+    render(<ResultCard item={make({ qualification: "exact_match" })} />);
+    expect(screen.getByText("Exact match")).toBeInTheDocument();
+    expect(screen.queryByText("Possible match")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Needs verification/)).not.toBeInTheDocument();
+  });
+
+  it("shows Possible match + Needs verification with the uncertain criterion", () => {
+    render(
+      <ResultCard
+        item={make({
+          qualification: "possible_match",
+          uncertain_criteria: ["Current employer startup classification", "Mentoring experience"],
+        })}
+      />,
+    );
+    expect(screen.getByText("Possible match")).toBeInTheDocument();
+    expect(screen.getByText(/Needs verification/)).toBeInTheDocument();
+    expect(screen.getByText(/startup classification/)).toBeInTheDocument();
+  });
+
+  it("shows the Final audit verified badge only when llm_verified is true", () => {
+    const { rerender } = render(<ResultCard item={make({ llm_verified: true })} />);
+    expect(screen.getByText("Final audit verified")).toBeInTheDocument();
+
+    rerender(<ResultCard item={make({ llm_verified: false })} />);
+    expect(screen.queryByText("Final audit verified")).not.toBeInTheDocument();
+  });
+
+  it("renders a near match with its missing requirement and no verified badge", () => {
+    render(
+      <ResultCard
+        variant="near"
+        item={make({
+          qualification: "not_match",
+          llm_verified: true,
+          unmet_criteria: ["CXO-level seniority"],
+        })}
+      />,
+    );
+    expect(screen.getByText("Near match")).toBeInTheDocument();
+    expect(screen.getByText(/Missing: CXO-level seniority/)).toBeInTheDocument();
+    expect(screen.queryByText("Final audit verified")).not.toBeInTheDocument();
   });
 });
