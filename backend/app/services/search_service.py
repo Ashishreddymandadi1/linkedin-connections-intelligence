@@ -23,6 +23,7 @@ Flow (V4 PART 3 §21):
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from sqlalchemy.orm import Session
 
@@ -159,11 +160,23 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         scored = rescored + scored[settings.rerank_pool :]
         scored.sort(key=_tier_key)  # cross-encoder must NOT reorder across tiers (V4 §25/§37)
 
+    # ── FINAL RESULT AUDIT (V4 PART 5) — one grounded LLM correctness pass over
+    #    the TOP_N + BUFFER pool, BEFORE reason generation / persistence. It can
+    #    only keep / downgrade / remove, never upgrade POSSIBLE->EXACT. Removed
+    #    candidates drop out; the un-audited tail is kept only for the counts and
+    #    is NEVER promoted into the shown results (§3/§23). ────────────────────
+    audit_run, audit_by_id, survivors, tail = _run_final_audit(
+        db, query, parsed, scored, near_pool, ctx, facts_by_id, vol_by_id, rec_by_id,
+    )
+    scored = survivors + tail
+
     total_scored = len(scored)
     exact_n = sum(1 for s in scored if s.qualification == Qualification.EXACT_MATCH)
     possible_n = sum(1 for s in scored if s.qualification == Qualification.POSSIBLE_MATCH)
-    top = scored[: settings.top_connections]
-    top = _maybe_llm_rerank(db, query, top)
+    if audit_run is not None:
+        top = survivors[: settings.final_result_audit_top_n]  # audited candidates only
+    else:
+        top = _maybe_llm_rerank(db, query, scored[: settings.top_connections])
 
     sq = repo.create_search_query(
         db,
@@ -180,6 +193,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         item = _to_result_item(
             db, rank, cand, parsed, query,
             use_llm_reason=settings.llm_reason_generation and rank <= settings.llm_reason_top_n,
+            audit=audit_by_id.get(cand.person.id),
         )
         results.append(item)
         repo.add_search_result(
@@ -209,6 +223,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         llm_provider=provider,
         llm_model=model,
         judge_metadata=judge_run.metadata.as_dict(),
+        audit_metadata=audit_run.metadata.as_dict() if audit_run else None,
     )
 
 
@@ -229,6 +244,79 @@ def load_search(db: Session, search_id: str) -> SearchResponse | None:
         llm_provider=sq.llm_provider,
         llm_model=sq.llm_model,
     )
+
+
+# ─────────────────────── final audit (V4 PART 5) ───────────────────────
+
+
+def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol_by_id, rec_by_id):
+    """Returns ``(audit_run | None, audit_by_id, survivors_sorted, tail)``.
+
+    Audits the TOP_N + BUFFER pool in ONE batched pass, validates every decision,
+    applies the allowed qualification transitions — removed candidates drop out
+    (or become 1-miss near-matches). ``tail`` = the scored candidates beyond the
+    audit pool, kept ONLY for the tier counts, never promoted (§3/§23)."""
+    if not settings.final_result_audit_enabled or not scored:
+        return None, {}, scored, []
+
+    from app.services.final_audit_validator import validate_audit
+    from app.services.final_auditor import run_final_audit
+
+    pool_n = max(1, settings.final_result_audit_top_n + settings.final_result_audit_buffer)
+    audit_pool = scored[:pool_n]
+    tail = scored[pool_n:]
+    bundle_by_id = {
+        c.person.id: (
+            c.person, facts_by_id[c.person.id],
+            {"volunteering": vol_by_id.get(c.person.id, []), "recommendations": rec_by_id.get(c.person.id, [])},
+        )
+        for c in audit_pool if c.person.id in facts_by_id
+    }
+    audit_run = run_final_audit(query, parsed, audit_pool, ctx, bundle_by_id=bundle_by_id)
+    meta = audit_run.metadata
+
+    survivors: list[ScoredCandidate] = []
+    audit_by_id: dict[str, dict] = {}
+    for cand in audit_pool:
+        raw = audit_run.decisions.get(cand.person.id) or {"person_id": cand.person.id, "audit_missing": True}
+        packet = audit_run.packets_by_id.get(cand.person.id) or {}
+        v = validate_audit(
+            raw, packet, parsed, facts_by_id[cand.person.id], ctx,
+            first_pass_qualification=cand.qualification,
+            first_pass_uncertain=cand.uncertain_required,
+        )
+        audit_run.decisions[cand.person.id] = v
+        audit_by_id[cand.person.id] = v
+        _tally(meta, v["decision"])
+
+        applied = v["applied_qualification"]
+        if applied == Qualification.NOT_MATCH:
+            if len(v["failed_required"]) == 1:
+                near_pool.append(replace(cand, qualification=Qualification.NOT_MATCH,
+                                         unmet_required=list(v["failed_required"])))
+            continue
+        nc = replace(cand, qualification=applied)
+        if applied == Qualification.POSSIBLE_MATCH and cand.qualification == Qualification.EXACT_MATCH:
+            nc = replace(nc, uncertain_required=(cand.uncertain_required
+                                                 or list(v["failed_required"])
+                                                 or ["downgraded by the final audit"]))
+        survivors.append(nc)
+
+    survivors.sort(key=_tier_key)
+    return audit_run, audit_by_id, survivors, tail
+
+
+def _tally(meta, decision: str) -> None:
+    from app.constants import AuditDecision
+
+    if decision == AuditDecision.APPROVED:
+        meta.approved += 1
+    elif decision == AuditDecision.DOWNGRADE:
+        meta.downgraded += 1
+    elif decision == AuditDecision.INCORRECT:
+        meta.incorrect += 1
+    else:
+        meta.unknown += 1
 
 
 # ─────────────────────── helpers ───────────────────────
@@ -335,6 +423,7 @@ def _to_result_item(
     query: str,
     *,
     use_llm_reason: bool = True,
+    audit: dict | None = None,
 ) -> SearchResultItem:
     p = cand.person
     reason = generate_reason(cand, query, allow_llm=use_llm_reason)
@@ -398,4 +487,9 @@ def _to_result_item(
         relevant_experience=rel_exp or [experience_to_out(e) for e in exps[:2]],
         relevant_skills=rel_skills,
         relevant_education=rel_edu,
+        audit_decision=(audit or {}).get("decision"),
+        audit_confidence=(audit or {}).get("confidence"),
+        audit_reason=((audit or {}).get("reason") or None),
+        audit_issues=(audit or {}).get("audit_issues", []),
+        llm_verified=bool((audit or {}).get("llm_verified")),
     )

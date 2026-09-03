@@ -14,6 +14,9 @@ os.environ["EMBEDDINGS_ENABLED"] = "false"
 os.environ["SEMANTIC_ENABLED"] = "false"
 os.environ["LLM_QUERY_INTERPRETATION"] = "false"
 os.environ["LLM_REASON_GENERATION"] = "false"
+# V4 PART 5 — the final audit is an LLM path; off by default in tests (like the
+# reason generator). Audit tests enable it and mock final_auditor._audit_batch.
+os.environ["FINAL_RESULT_AUDIT_ENABLED"] = "false"
 os.environ["DEVELOPMENT_BATCH_SIZE"] = "3"
 os.environ.setdefault("GROQ_API_KEY", "")
 os.environ.setdefault("APIFY_API_TOKEN", "")

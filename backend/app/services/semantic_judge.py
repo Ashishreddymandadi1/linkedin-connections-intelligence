@@ -176,7 +176,11 @@ def run_judge(
     meta.judge_candidate_count = len(packets)
 
     payload = plan_payload(query, parsed, jcrits)
-    batches, oversized = _make_batches(packets)
+    batches, oversized = _make_batches(
+        packets,
+        size=settings.semantic_judge_batch_size,
+        max_chars=settings.semantic_judge_max_batch_chars,
+    )
     meta.judge_batch_count = len(batches)
     meta.oversized_packets = len(oversized)
     if oversized:
@@ -224,14 +228,17 @@ def _pkt_chars(pkt: dict) -> int:
     return len(json.dumps(pkt, ensure_ascii=False, default=str))
 
 
-def _make_batches(packets: list[dict]) -> tuple[list[list[dict]], list[str]]:
-    """Pack packets into ``<= semantic_judge_batch_size`` / ``<= max_batch_chars``
-    batches. A single packet that itself exceeds ``max_batch_chars`` (or was
-    flagged ``_packet_too_large``) is NEVER placed in a batch — it would create
-    an oversized provider request. Its person_id is returned as ``oversized`` and
-    the candidate is left unjudged / UNKNOWN, status PARTIAL (V4 PART 3.6 §8)."""
-    size = max(1, settings.semantic_judge_batch_size)
-    max_chars = max(2000, settings.semantic_judge_max_batch_chars)
+def _make_batches(
+    packets: list[dict], *, size: int, max_chars: int,
+) -> tuple[list[list[dict]], list[str]]:
+    """Pack packets into ``<= size`` / ``<= max_chars`` batches. A single packet
+    that itself exceeds ``max_chars`` (or was flagged ``_packet_too_large``) is
+    NEVER placed in a batch — it would create an oversized provider request. Its
+    person_id is returned as ``oversized`` and the candidate is left
+    unjudged / UNKNOWN, status PARTIAL (V4 PART 3.6 §8 / PART 5 §40). Shared by
+    the exhaustive judge and the final auditor."""
+    size = max(1, size)
+    max_chars = max(2000, max_chars)
     batches: list[list[dict]] = []
     oversized: list[str] = []
     cur: list[dict] = []

@@ -134,6 +134,12 @@ export interface SearchResultItem {
   relevant_experience: ExperienceOut[];
   relevant_skills: SkillOut[];
   relevant_education: EducationOut[];
+  // V4 PART 5 §26 — final-audit outcome (optional, backward-compatible).
+  audit_decision?: "approved" | "downgrade" | "incorrect" | "unknown" | null;
+  audit_confidence?: number | null;
+  audit_reason?: string | null;
+  audit_issues?: string[];
+  llm_verified?: boolean;
 }
 
 export interface SearchResponse {
@@ -194,6 +200,24 @@ export interface SearchResponse {
     omitted_criteria: number;
     // V4 PART 3.6 §8 — packets too large to judge (subset of omitted_people)
     oversized_packets?: number;
+    providers: Record<string, number>;
+    models: string[];
+  } | null;
+  // V4 PART 5 §25 — observability for the final result audit. Live-response
+  // only for now (persistence + UI are PART 7-9).
+  audit_metadata?: {
+    enabled: boolean;
+    status: "full" | "partial" | "not_used" | "unavailable";
+    requested_candidates: number;
+    audited_candidates: number;
+    batch_count: number;
+    successful_batches: number;
+    failed_batches: number;
+    oversized_packets: number;
+    approved: number;
+    downgraded: number;
+    incorrect: number;
+    unknown: number;
     providers: Record<string, number>;
     models: string[];
   } | null;

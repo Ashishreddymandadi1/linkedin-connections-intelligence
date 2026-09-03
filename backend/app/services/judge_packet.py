@@ -67,15 +67,19 @@ def _ref(prefix: str, row, idx: int) -> str:
 
 def build_packets(
     bundle: list[tuple], parsed: ParsedSearchQuery, ctx: ScoringContext, *, query: str,
+    max_packet_chars: int | None = None,
 ) -> list[dict]:
     """``bundle``: ``[(person, ProfileFacts, {"volunteering": [...], "recommendations": [...]})]``.
-    Returns one packet dict per candidate (same order)."""
+    Returns one packet dict per candidate (same order). ``max_packet_chars``
+    overrides ``settings.semantic_judge_max_packet_chars`` (the final auditor
+    uses its own budget, V4 PART 5 §4/§40)."""
     toks = priority_tokens(query, parsed)
     want_mentor_context = bool(toks & _MENTOR_TOKENS) or parsed.intent == "mentor_recommendation"
     want_academia_context = bool(toks & _ACADEMIA_TOKENS)
     return [
         _one_packet(person, facts, extras, ctx, toks,
-                    want_mentor_context=want_mentor_context, want_academia_context=want_academia_context)
+                    want_mentor_context=want_mentor_context, want_academia_context=want_academia_context,
+                    max_packet_chars=max_packet_chars)
         for person, facts, extras in bundle
     ]
 
@@ -130,7 +134,8 @@ def packet_experience_current_map(packet: dict) -> dict[str, bool]:
 
 
 def _one_packet(person, facts: ProfileFacts, extras: dict, ctx: ScoringContext, toks: set[str],
-                *, want_mentor_context: bool, want_academia_context: bool) -> dict:
+                *, want_mentor_context: bool, want_academia_context: bool,
+                max_packet_chars: int | None = None) -> dict:
     exps = list(reversed(ordered_experiences(list(facts.experiences))))  # newest first
     current = next((e for e in exps if getattr(e, "is_current", False)), None)
     past = [e for e in exps if not getattr(e, "is_current", False)]
@@ -268,14 +273,14 @@ def _one_packet(person, facts: ProfileFacts, extras: dict, ctx: ScoringContext, 
             for ed in facts.education[:8]
         ]
 
-    return _fit_size(packet)
+    return _fit_size(packet, max_packet_chars)
 
 
 def _size(packet: dict) -> int:
     return len(json.dumps(packet, ensure_ascii=False, default=str))
 
 
-def _fit_size(packet: dict) -> dict:
+def _fit_size(packet: dict, cap: int | None = None) -> dict:
     """HARD-ENFORCE the per-packet char budget (V4 PART 3.6 §7).
 
     Progressive trimming, least-critical evidence first. On return the invariant
@@ -286,7 +291,8 @@ def _fit_size(packet: dict) -> dict:
 
     NEVER removed: person_id, current-role identity, company classifications
     relevant to the query, and the evidence refs of any retained evidence."""
-    cap = settings.semantic_judge_max_packet_chars
+    if cap is None:
+        cap = settings.semantic_judge_max_packet_chars
     if cap <= 0 or _size(packet) <= cap:
         return packet
 

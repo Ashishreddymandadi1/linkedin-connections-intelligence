@@ -121,6 +121,18 @@ class Settings(BaseSettings):
     #: (V4 §7) — a low-confidence TRUE cannot produce an EXACT_MATCH
     company_category_confidence_min: float = 0.6
 
+    # ── V4 PART 5 — final result correctness audit ──────────
+    #: ONE grounded LLM review of the candidates about to be shown. Downgrade /
+    #: remove only — it can never upgrade POSSIBLE->EXACT or invent a score.
+    final_result_audit_enabled: bool = True
+    #: how many results the search returns after the audit; the audit itself runs
+    #: over TOP_N + BUFFER so a removal can be back-filled without a 2nd LLM call.
+    final_result_audit_top_n: int = 20
+    final_result_audit_buffer: int = 10
+    final_result_audit_batch_size: int = 10   # candidates per audit request (never 1/candidate)
+    final_result_audit_max_packet_chars: int = 6000
+    final_result_audit_max_batch_chars: int = 44000
+
     # ── Current-user profile context (V4 PART 2 §3) ──────────
     #: Used ONLY to resolve relational queries like "anyone in my field" /
     #: "a mentor in my space". Left empty by default: when a query says "my

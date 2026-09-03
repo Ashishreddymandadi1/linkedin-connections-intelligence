@@ -394,6 +394,88 @@ class JudgePersonVerdict(BaseModel):
         return out
 
 
+class FinalAuditCriterionReview(BaseModel):
+    """The final auditor's consistency check of ONE criterion (V4 PART 5 §13)."""
+
+    criterion_id: str
+    #: supported | unsupported | uncertain — is the first-pass status defensible?
+    status_review: str = "uncertain"
+    reason: str = ""
+    supporting_evidence_refs: list[str] = []
+    contradicting_evidence_refs: list[str] = []
+
+    @field_validator("status_review", mode="before")
+    @classmethod
+    def _norm_review(cls, v):
+        v = str(v or "").strip().lower().replace(" ", "_")
+        return v if v in ("supported", "unsupported", "uncertain") else "uncertain"
+
+    _norm_refs = field_validator(
+        "supporting_evidence_refs", "contradicting_evidence_refs", mode="before",
+    )(staticmethod(_coerce_str_list))
+
+
+class FinalAuditPersonDecision(BaseModel):
+    """The final auditor's overall verdict for one candidate (V4 PART 5 §5)."""
+
+    person_id: str
+    decision: str = "unknown"          # approved | downgrade | incorrect | unknown
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    reason: str = ""
+    criteria: list[FinalAuditCriterionReview] = []
+    supporting_evidence_refs: list[str] = []
+    contradicting_evidence_refs: list[str] = []
+    #: advisory ONLY — the backend computes the applied qualification and never
+    #: upgrades POSSIBLE -> EXACT from the auditor (§9).
+    suggested_qualification: str | None = None
+
+    @field_validator("decision", mode="before")
+    @classmethod
+    def _norm_decision(cls, v):
+        v = str(v or "").strip().lower().replace(" ", "_")
+        return v if v in ("approved", "downgrade", "incorrect", "unknown") else "unknown"
+
+    @field_validator("suggested_qualification", mode="before")
+    @classmethod
+    def _norm_sq(cls, v):
+        if not v:
+            return None
+        v = str(v).strip().lower().replace(" ", "_")
+        return v if v in ("exact_match", "possible_match", "not_match") else None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp01(cls, v):
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    _norm_refs = field_validator(
+        "supporting_evidence_refs", "contradicting_evidence_refs", mode="before",
+    )(staticmethod(_coerce_str_list))
+
+    @field_validator("criteria", mode="before")
+    @classmethod
+    def _drop_bad(cls, v):
+        if not v:
+            return []
+        return [c for c in (v if isinstance(v, list) else [v])
+                if not isinstance(c, dict) or c.get("criterion_id")]
+
+
+class FinalAuditBatch(BaseModel):
+    people: list[FinalAuditPersonDecision] = []
+
+    @field_validator("people", mode="before")
+    @classmethod
+    def _drop_bad_people(cls, v):
+        if not v:
+            return []
+        return [p for p in (v if isinstance(v, list) else [v])
+                if not isinstance(p, dict) or p.get("person_id")]
+
+
 class JudgeBatch(BaseModel):
     people: list[JudgePersonVerdict] = []
 
@@ -609,6 +691,14 @@ class SearchResultItem(BaseModel):
     relevant_experience: list[ExperienceOut] = []
     relevant_skills: list[SkillOut] = []
     relevant_education: list[EducationOut] = []
+    #: V4 PART 5 §26 — final-audit outcome (optional, backward-compatible).
+    audit_decision: str | None = None
+    audit_confidence: float | None = None
+    audit_reason: str | None = None
+    audit_issues: list[str] = []
+    #: True only when the final auditor APPROVED this candidate against validated
+    #: evidence — a stronger signal than the deterministic qualification alone.
+    llm_verified: bool = False
 
 
 class ConnectionBucket(BaseModel):
@@ -647,3 +737,7 @@ class SearchResponse(BaseModel):
     #: (mode, status, candidate/batch counts, providers). Backward-compatible:
     #: absent on searches that did not run the judge.
     judge_metadata: dict[str, Any] | None = None
+    #: V4 PART 5 §25 — optional observability block for the final result audit
+    #: (enabled, status, pool/batch counts, decision tally, providers).
+    #: Live-response only for now — persistence is PART 7-9.
+    audit_metadata: dict[str, Any] | None = None

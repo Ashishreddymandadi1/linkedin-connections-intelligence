@@ -170,6 +170,33 @@ CODE_AUTHORITATIVE_CRITERION_TYPES = {
 }
 
 
+class AuditDecision:
+    """The final result auditor's verdict for one candidate (V4 PART 5 §8).
+
+    A correctness BRAKE only — it can keep, downgrade or remove a candidate, it
+    can never upgrade POSSIBLE -> EXACT or invent a numeric score.
+    """
+
+    APPROVED = "approved"      # the existing qualification is supported
+    DOWNGRADE = "downgrade"    # relevant, but something "verified" is actually uncertain
+    INCORRECT = "incorrect"    # a required condition clearly fails — remove from results
+    UNKNOWN = "unknown"        # the audit could not reliably decide — be conservative
+
+
+ALL_AUDIT_DECISIONS = {
+    AuditDecision.APPROVED, AuditDecision.DOWNGRADE, AuditDecision.INCORRECT, AuditDecision.UNKNOWN,
+}
+
+
+class AuditStatus:
+    """Outcome of the final-audit pass for a search (V4 PART 5 §20/§25)."""
+
+    FULL = "full"                # every audit-pool candidate got a validated decision
+    PARTIAL = "partial"          # a batch failed / the model omitted people
+    NOT_USED = "not_used"        # audit disabled or nothing to audit
+    UNAVAILABLE = "unavailable"  # every provider failed — no decisions at all
+
+
 class QueryIntent:
     """What the searcher is actually trying to accomplish (V4 PART 2 §1).
 
