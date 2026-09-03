@@ -69,6 +69,12 @@ _SEMANTIC_TYPES = {
     CriterionType.ROLE_FUNCTION, CriterionType.CAREER_TRANSITION,
     CriterionType.YEARS_EXPERIENCE,
 }
+#: semantic types the LLM judge may OVERRIDE with a validated TRUE/FALSE verdict
+#: (V4 PART 3 §15). CAREER_TRANSITION / YEARS_EXPERIENCE stay code-authoritative
+#: — the judge never decides verified ordering or durations (§16).
+_JUDGE_OVERRIDABLE = _SEMANTIC_TYPES - {
+    CriterionType.CAREER_TRANSITION, CriterionType.YEARS_EXPERIENCE,
+}
 
 
 @dataclass
@@ -664,14 +670,18 @@ def _score_one(
     """Returns ``(strength, evidence, status)``. ``status`` is a TriState for
     semantic criteria, else ``None``."""
     try:
-        # judge verdict (upstream LLM pass) overrides for semantic criteria
+        # validated judge verdict (V4 PART 3) — overrides local scoring ONLY for a
+        # confident TRUE / FALSE on a judgeable semantic type. UNKNOWN / omitted
+        # falls through to the deterministic scorer (§30/§48); chronology stays
+        # code-authoritative (§16).
         jr = ctx.judge_results.get(facts.person.id, {}).get(crit.id)
-        if jr and crit.type in _SEMANTIC_TYPES:
+        if jr and crit.type in _JUDGE_OVERRIDABLE and jr.get("status") in (TriState.TRUE, TriState.FALSE):
             return (
                 float(jr.get("match_strength", 0.0)),
-                [EvidenceItem(type="semantic", text=jr.get("reason", "")[:220],
+                [EvidenceItem(type="semantic", text=(jr.get("reason") or "")[:220],
                               detail={"confidence": jr.get("confidence"), "judge": True,
-                                      "evidence": jr.get("evidence", [])[:3]})]
+                                      "evidence": (jr.get("evidence") or [])[:3],
+                                      "supporting_refs": jr.get("supporting_evidence_refs", [])})]
                 if jr.get("status") == TriState.TRUE else [],
                 jr.get("status"),
             )

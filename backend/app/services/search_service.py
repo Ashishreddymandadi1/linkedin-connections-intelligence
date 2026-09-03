@@ -1,4 +1,25 @@
-"""Orchestrate a connection search (spec §33, §38–§41, §50–§51)."""
+"""Orchestrate a connection search (spec §33, §38–§41, §50–§51; V4 PART 3).
+
+Flow (V4 PART 3 §21):
+
+    interpret query
+      -> full local network scan (candidate_pool, <= FULL_SCAN_MAX_CONNECTIONS
+         means EVERYONE)
+      -> bulk-load every fact once
+      -> HARD-FACT VIABILITY GATE  (candidate_gate) — reject ONLY on a verified
+         contradiction the LLM cannot reasonably overturn
+      -> local pre-score the viable set (evidence / prior signal only — it does
+         NOT remove anyone, MIN_MATCH_SCORE is not applied here)
+      -> EXHAUSTIVE SEMANTIC JUDGE (semantic_judge.run_judge) — in all_viable
+         mode EVERY viable candidate is judged, in batches
+      -> FACT-CONSISTENCY VALIDATOR (judge_validator) — every verdict checked
+         against the packet + locked facts before it can change a score
+      -> deterministic rescore with the validated verdicts
+      -> qualification tier (exact / possible / not_match); drop not_match
+      -> NOW apply MIN_MATCH_SCORE
+      -> cross-encoder rerank WITHIN tiers
+      -> top results + judge observability metadata
+"""
 from __future__ import annotations
 
 import logging
@@ -11,18 +32,20 @@ from app.constants import _QUALIFICATION_RANK, CriterionType, Qualification
 from app.models import SearchQuery
 from app.schemas import (
     ConnectionBucket,
-    EducationOut,
     ExternalBucket,
     ParsedSearchQuery,
     SearchResponse,
     SearchResultItem,
 )
+from app.services.candidate_gate import hard_gate
 from app.services.candidate_pool import get_candidates
+from app.services.judge_validator import validate_person
 from app.services.matching import company_matches, norm_company
 from app.services.person_view import education_to_out, experience_to_out, skill_to_out
 from app.services.query_interpreter import interpret_query
 from app.services.reason_generator import generate_reason
 from app.services.scoring import ScoredCandidate, ScoringContext, load_facts, score_candidate
+from app.services.semantic_judge import run_judge
 
 log = logging.getLogger("app.search")
 
@@ -34,16 +57,14 @@ def _tier_key(s):
 
 def run_connection_search(db: Session, *, dataset_id: str, query: str) -> SearchResponse:
     parsed, provider, model = interpret_query(query)
-    log.info("query %r -> %d criteria via %s", query, len(parsed.criteria), provider)
-    # any real LLM answered (not the deterministic fallback) -> downstream LLM
-    # steps (reasons, judge, rerank) are worth attempting (spec §29)
-    llm_available = provider != "deterministic"
+    log.info("query %r -> %d criteria (intent=%s) via %s",
+             query, len(parsed.criteria), parsed.intent, provider)
 
-    query_embedding = _maybe_embed(query)
+    query_embedding = _maybe_embed(query)  # for relevance RANKING only — never gates
     candidates, total = get_candidates(db, dataset_id, parsed, query_embedding)
     pids = [p.id for p in candidates]
 
-    # bulk-load every fact once for the whole pool (spec §31 — no per-candidate N+1)
+    # bulk-load every fact once (spec §31 / PART 3 §58 — no per-candidate N+1)
     facts_cache = {
         "experiences": repo.bulk_experiences(db, pids),
         "education": repo.bulk_education(db, pids),
@@ -54,35 +75,77 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         "semantics": repo.bulk_semantics(db, pids),
         "embeddings": repo.bulk_embeddings_by_person(db, pids),
     }
+    vol_by_id = repo.bulk_volunteering(db, pids)
+    rec_by_id = repo.bulk_recommendations(db, pids)
 
     ctx = ScoringContext(
         query_embedding=query_embedding,
         company_ids_by_criterion=_resolve_company_ids(db, dataset_id, parsed),
         company_class=_pool_company_class(db, parsed, facts_cache["experiences"]),
     )
-
     facts_by_id: dict = {p.id: load_facts(db, p, facts_cache) for p in candidates}
 
-    # pass 1 — deterministic facts + assertion/company-class concepts + embedding relevance
+    # ── hard-fact viability gate (V4 PART 3 §4-§7) ────────────────────
+    decisions = {p.id: hard_gate(facts_by_id[p.id], parsed, ctx) for p in candidates}
+    viable = [p for p in candidates if decisions[p.id].viable]
+    hard_rejected = [p for p in candidates if not decisions[p.id].viable]
+    log.info("hard-fact gate: %d viable, %d rejected (of %d scanned)",
+             len(viable), len(hard_rejected), total)
+
+    # ── local pre-score the viable set — evidence / prior signal only,
+    #    NOT a filter, MIN_MATCH_SCORE deliberately not applied (§21/§22) ──
+    prescored: dict[str, ScoredCandidate] = {
+        p.id: score_candidate(facts_by_id[p.id], parsed, ctx) for p in viable
+    }
+
+    # ── exhaustive semantic judge (§8-§10) ───────────────────────────
+    bundle = [
+        (p, facts_by_id[p.id],
+         {"volunteering": vol_by_id.get(p.id, []), "recommendations": rec_by_id.get(p.id, [])})
+        for p in viable
+    ]
+    judge_run = run_judge(
+        query, parsed, bundle, ctx,
+        network_size=total, pool_size=len(candidates),
+        hard_rejected_count=len(hard_rejected), local_scored=prescored,
+    )
+
+    # ── validate every verdict before it can change a score (§17) ────
+    for pid, person_verdicts in judge_run.verdicts.items():
+        packet = judge_run.packets_by_id.get(pid)
+        if packet is None or pid not in facts_by_id:
+            continue
+        validated = validate_person(person_verdicts, packet, parsed, facts_by_id[pid], ctx)
+        if validated:
+            ctx.judge_results[pid] = validated
+
+    # ── deterministic rescore with the validated verdicts (authoritative) ──
     scored: list[ScoredCandidate] = []
     near_pool: list[ScoredCandidate] = []
-    for person in candidates:
-        result = score_candidate(facts_by_id[person.id], parsed, ctx)
-        if result.qualification == Qualification.NOT_MATCH:
-            # a candidate that misses exactly ONE required criterion is a near-match
-            if len(result.unmet_required) == 1:
-                near_pool.append(result)
+    for p in viable:
+        r = score_candidate(facts_by_id[p.id], parsed, ctx)
+        if r.qualification == Qualification.NOT_MATCH:
+            if len(r.unmet_required) == 1:
+                near_pool.append(r)
             continue
-        if result.match_score < settings.min_match_score:
-            continue
-        scored.append(result)
+        scored.append(r)
+
+    # hard-rejected candidates that miss only one thing — surfaced as near-matches,
+    # never judged, never in the main results
+    for p in hard_rejected:
+        r = score_candidate(facts_by_id[p.id], parsed, ctx)
+        if r.qualification == Qualification.NOT_MATCH and len(r.unmet_required) <= 2:
+            near_pool.append(r)
+
+    # ── NOW apply MIN_MATCH_SCORE (never before the judge, §22). A verified
+    #    EXACT_MATCH is kept even with a modest numeric score. ──
+    scored = [
+        s for s in scored
+        if s.match_score >= settings.min_match_score or s.qualification == Qualification.EXACT_MATCH
+    ]
     scored.sort(key=_tier_key)
 
-    # semantic judge — bounded, batched LLM pass for ambiguous concept criteria
-    scored = _maybe_judge(db, query, parsed, scored, facts_by_id, candidates, ctx, llm_available)
-    scored.sort(key=_tier_key)
-
-    # rerank pool — cross-encoder over the top RERANK_POOL, then re-score
+    # ── cross-encoder rerank WITHIN tiers (§37) ──────────────────────
     pool = scored[: settings.rerank_pool]
     if settings.reranker_enabled and pool:
         from app.services.reranker import cross_encode
@@ -91,17 +154,16 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         for c, ce in zip(pool, cross_encode(query, texts)):
             ctx.reranker_scores[c.person.id] = ce
         rescored = [score_candidate(facts_by_id[c.person.id], parsed, ctx) for c in pool]
-        rescored = [r for r in rescored
-                    if r.qualification != Qualification.NOT_MATCH and r.match_score >= settings.min_match_score]
+        rescored = [r for r in rescored if r.qualification != Qualification.NOT_MATCH]
         rescored.sort(key=_tier_key)
         scored = rescored + scored[settings.rerank_pool :]
-        scored.sort(key=_tier_key)  # cross-encoder must NOT reorder across tiers (V4 §25)
+        scored.sort(key=_tier_key)  # cross-encoder must NOT reorder across tiers (V4 §25/§37)
 
     total_scored = len(scored)
     exact_n = sum(1 for s in scored if s.qualification == Qualification.EXACT_MATCH)
     possible_n = sum(1 for s in scored if s.qualification == Qualification.POSSIBLE_MATCH)
     top = scored[: settings.top_connections]
-    top = _maybe_llm_rerank(db, query, top, facts_by_id, llm_available)
+    top = _maybe_llm_rerank(db, query, top)
 
     sq = repo.create_search_query(
         db,
@@ -117,26 +179,23 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     for rank, cand in enumerate(top, start=1):
         item = _to_result_item(
             db, rank, cand, parsed, query,
-            use_llm_reason=llm_available and rank <= settings.llm_reason_top_n,
+            use_llm_reason=settings.llm_reason_generation and rank <= settings.llm_reason_top_n,
         )
         results.append(item)
         repo.add_search_result(
-            db,
-            search_id=sq.id,
-            person_id=cand.person.id,
-            bucket="connection",
-            rank=rank,
-            match_score=item.match_score,
-            data_confidence=item.data_confidence,
-            reason=item.reason,
-            payload=item.model_dump(),
+            db, search_id=sq.id, person_id=cand.person.id, bucket="connection", rank=rank,
+            match_score=item.match_score, data_confidence=item.data_confidence,
+            reason=item.reason, payload=item.model_dump(),
         )
 
     near_pool.sort(key=lambda s: s.match_score, reverse=True)
-    near_items = [
-        _to_result_item(db, i, cand, parsed, query, use_llm_reason=False)
-        for i, cand in enumerate(near_pool[:5], start=1)
-    ]
+    seen_near: set[str] = set()
+    near_items: list[SearchResultItem] = []
+    for i, cand in enumerate(near_pool, start=1):
+        if cand.person.id in seen_near or len(near_items) >= 5:
+            continue
+        seen_near.add(cand.person.id)
+        near_items.append(_to_result_item(db, i, cand, parsed, query, use_llm_reason=False))
 
     return SearchResponse(
         search_id=sq.id,
@@ -149,6 +208,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         external=ExternalBucket(searched=False),
         llm_provider=provider,
         llm_model=model,
+        judge_metadata=judge_run.metadata.as_dict(),
     )
 
 
@@ -198,10 +258,10 @@ def _resolve_company_ids(db: Session, dataset_id: str, parsed: ParsedSearchQuery
 
 
 def _pool_company_class(db: Session, parsed: ParsedSearchQuery, exp_by_person: dict) -> dict:
-    """CACHE-ONLY employer classification for the candidate pool (V4 §8). Normal
-    search NEVER launches classification LLM jobs — a missing classification is
-    left UNKNOWN. Bulk classification happens only via backfill / a maintenance
-    job (scripts.backfill_v3 / enrichment_runner.classify_companies)."""
+    """CACHE-ONLY employer classification for the candidate pool (V4 §8 / PART 3
+    §26/§59). Normal search NEVER launches classification LLM jobs — a missing
+    classification is left UNKNOWN. Bulk classification happens only via backfill
+    / a maintenance job."""
     from app.services.company_intel import company_key, to_dict
 
     seen: dict[tuple, tuple] = {}
@@ -215,48 +275,6 @@ def _pool_company_class(db: Session, parsed: ParsedSearchQuery, exp_by_person: d
     keys = [company_key(cid, nm) for cid, nm, _ in seen.values()]
     rows = repo.get_company_semantics(db, keys)
     return {k: to_dict(r) for k, r in rows.items()}
-
-
-def _maybe_judge(db, query, parsed, scored, facts_by_id, candidates, ctx, llm_available):
-    """Batched LLM judge for ambiguous semantic-concept criteria (spec §16-18)."""
-    if not settings.semantic_judge_enabled or not llm_available:
-        return scored
-    sem_crits = [c for c in parsed.criteria if c.type in (CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY)]
-    if not sem_crits:
-        return scored
-
-    lo, hi = settings.semantic_judge_low, settings.semantic_judge_high
-    by_person = {c.person.id: c for c in scored}
-    ambiguous_ids = set()
-    for cand in scored[: settings.semantic_judge_pool]:
-        for comp in cand.components:
-            if comp.type in ("semantic_concept", "company_category") and lo <= comp.match_strength <= hi:
-                ambiguous_ids.add(cand.person.id)
-    if not ambiguous_ids:
-        return scored
-
-    from app.services.semantic_judge import judge
-
-    to_judge = [
-        (next(p for p in candidates if p.id == pid), facts_by_id[pid])
-        for pid in ambiguous_ids
-        if pid in facts_by_id
-    ][: settings.semantic_judge_pool]
-    verdicts = judge(db, query, sem_crits, to_judge, ctx)
-    if not verdicts:
-        return scored
-
-    ctx.judge_results.update(verdicts)
-    rescored = []
-    for cand in scored:
-        if cand.person.id in verdicts:
-            r = score_candidate(facts_by_id[cand.person.id], parsed, ctx)
-            if r.excluded_reason or r.match_score < settings.min_match_score:
-                continue
-            rescored.append(r)
-        else:
-            rescored.append(cand)
-    return rescored
 
 
 def _candidate_text(db: Session, cand: ScoredCandidate, facts_by_id: dict) -> str:
@@ -274,8 +292,10 @@ def _candidate_text(db: Session, cand: ScoredCandidate, facts_by_id: dict) -> st
     )
 
 
-def _maybe_llm_rerank(db: Session, query: str, top: list, facts_by_id: dict, llm_available: bool) -> list:
-    if not settings.llm_rerank_enabled or not llm_available or len(top) < 3:
+def _maybe_llm_rerank(db: Session, query: str, top: list) -> list:
+    # V4 PART 3 §36 — the exhaustive criterion-level judge replaces this; it stays
+    # disabled unless an operator explicitly opts in.
+    if not settings.llm_rerank_enabled or len(top) < 3:
         return top
     from app.services.reranker import llm_rerank
 
@@ -292,7 +312,6 @@ def _maybe_llm_rerank(db: Session, query: str, top: list, facts_by_id: dict, llm
         return top
     by_id = {c.person.id: c for c in top}
     reordered = [by_id[pid] for pid in res["order"] if pid in by_id and pid not in res["drop"]]
-    # append any the LLM omitted, preserving their prior order
     seen = {c.person.id for c in reordered}
     reordered += [c for c in top if c.person.id not in seen and c.person.id not in res["drop"]]
     return reordered

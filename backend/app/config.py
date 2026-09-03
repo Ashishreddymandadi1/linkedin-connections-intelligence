@@ -96,11 +96,25 @@ class Settings(BaseSettings):
     #: (spec §10/§31: correctness over shaving milliseconds on a ~1k network).
     full_scan_max_connections: int = 5000
     company_classification_enabled: bool = True
-    #: candidates in this confidence band get a batched LLM semantic judge call
-    #: for their semantic_concept/company_category criteria (spec §16-18).
+    #: master switch — False disables the semantic judge entirely.
     semantic_judge_enabled: bool = True
-    semantic_judge_pool: int = 60           # max candidates considered for judging per search
-    semantic_judge_batch_size: int = 10
+    #: V4 PART 3 §8 — off | uncertain_only | all_viable.
+    #:   all_viable      -> EVERY candidate past the hard-fact gate is judged
+    #:                      (the correct setting for a ~1k network).
+    #:   uncertain_only  -> only ambiguity-band candidates (cheaper deployments).
+    #:   off             -> deterministic scoring only.
+    semantic_judge_mode: str = "all_viable"
+    #: V4 PART 3 §9 — hard cap on judged candidates AFTER hard-fact gating.
+    #: 0 = NO artificial cap. A positive value is respected and the response
+    #: reports the run was capped (never a silent cap).
+    semantic_judge_max_candidates: int = 0
+    semantic_judge_batch_size: int = 10     # candidates per LLM judge request (never 1/candidate)
+    #: V4 PART 3 §34 — prompt-size guards. A batch whose packets exceed these is
+    #: split into smaller batches rather than truncated into meaninglessness.
+    semantic_judge_max_packet_chars: int = 7000
+    semantic_judge_max_batch_chars: int = 48000
+    #: uncertain_only mode only — the ambiguity band + pool cap (ignored by all_viable).
+    semantic_judge_pool: int = 60
     semantic_judge_low: float = 0.15        # below this concept strength: skip judging, already a clear miss
     semantic_judge_high: float = 0.75       # above this: skip judging, already a clear hit
     #: a cached company classification below this confidence is treated as UNKNOWN

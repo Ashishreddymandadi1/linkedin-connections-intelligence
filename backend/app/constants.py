@@ -132,6 +132,44 @@ _QUALIFICATION_RANK = {
 }
 
 
+class JudgeMode:
+    """How many candidates reach the LLM semantic judge (V4 PART 3 §8)."""
+
+    OFF = "off"                        # no semantic judge at all
+    UNCERTAIN_ONLY = "uncertain_only"  # only ambiguity-band candidates (cheap mode)
+    ALL_VIABLE = "all_viable"          # EVERY candidate past the hard-fact gate
+
+
+ALL_JUDGE_MODES = {JudgeMode.OFF, JudgeMode.UNCERTAIN_ONLY, JudgeMode.ALL_VIABLE}
+
+
+class JudgeStatus:
+    """Outcome of the semantic-judge run for a search (V4 PART 3 §29)."""
+
+    FULL = "full"                # every viable candidate got a validated verdict
+    PARTIAL = "partial"          # some batches failed / model omitted people or criteria
+    NOT_USED = "not_used"        # mode=off, judging disabled, or no judgeable criteria
+    UNAVAILABLE = "unavailable"  # every provider failed — no verdicts at all
+
+
+#: criterion types the LLM judge is allowed to decide (professional MEANING).
+#: Everything else is deterministic / code-authoritative (V4 PART 3 §15/§16).
+JUDGEABLE_CRITERION_TYPES = {
+    CriterionType.SEMANTIC_CONCEPT,
+    CriterionType.PROFESSIONAL_CONCEPT,
+    CriterionType.ROLE_FUNCTION,
+    CriterionType.INDUSTRY_EXPERIENCE,
+    CriterionType.COMPANY_CATEGORY,
+}
+
+#: the judge may be SHOWN the deterministic verdict for these as context, but it
+#: can never change verified ordering / durations (V4 PART 3 §16).
+CODE_AUTHORITATIVE_CRITERION_TYPES = {
+    CriterionType.CAREER_TRANSITION,
+    CriterionType.YEARS_EXPERIENCE,
+}
+
+
 class QueryIntent:
     """What the searcher is actually trying to accomplish (V4 PART 2 §1).
 

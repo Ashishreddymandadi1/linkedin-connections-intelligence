@@ -324,6 +324,94 @@ class CompanyClassificationBatch(BaseModel):
     companies: list[CompanyClassificationItem] = []
 
 
+# ─────────────────── validated LLM output: exhaustive semantic judge (V4 PART 3 §14) ───────────────────
+
+
+class JudgeCriterionVerdict(BaseModel):
+    """The judge's read of ONE professional-meaning criterion for one person.
+    Grounded in packet evidence references — the backend validates every ref and
+    rejects invented ones (V4 PART 3 §13/§17)."""
+
+    criterion_id: str
+    #: true (evidence clearly supports it) / false (evidence clearly contradicts
+    #: it) / unknown (packet insufficient — NOT the same as false).
+    status: str = "unknown"
+    match_strength: float = Field(ge=0.0, le=1.0, default=0.0)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    reason: str = ""
+    #: packet refs ("exp:<id>", "edu:<id>", "cert:<id>", "skill:<norm>",
+    #: "assertion:<index>", "company:<key>") that SUPPORT the verdict.
+    supporting_evidence_refs: list[str] = []
+    contradicting_evidence_refs: list[str] = []
+    #: experience_ids the verdict is grounded in (subset of supporting refs).
+    experience_ids: list[str] = []
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _norm_status(cls, v):
+        v = str(v or "").strip().lower()
+        return v if v in ("true", "false", "unknown") else "unknown"
+
+    _norm_refs = field_validator(
+        "supporting_evidence_refs", "contradicting_evidence_refs", "experience_ids",
+        mode="before",
+    )(staticmethod(_coerce_str_list))
+
+    @field_validator("match_strength", "confidence", mode="before")
+    @classmethod
+    def _clamp01(cls, v):
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.0
+
+
+class JudgePersonVerdict(BaseModel):
+    person_id: str
+    criteria: list[JudgeCriterionVerdict] = []
+    #: informational only — MUST NOT override required criteria (V4 PART 3 §14).
+    overall_fit: str = "moderate"
+    overall_reason: str = ""
+
+    @field_validator("overall_fit", mode="before")
+    @classmethod
+    def _norm_fit(cls, v):
+        v = str(v or "").strip().lower().replace(" ", "_")
+        return v if v in ("strong", "moderate", "weak", "not_fit") else "moderate"
+
+    @field_validator("criteria", mode="before")
+    @classmethod
+    def _drop_bad_criteria(cls, v):
+        if not v:
+            return []
+        out = []
+        for c in (v if isinstance(v, list) else [v]):
+            if isinstance(c, dict):
+                if c.get("criterion_id"):
+                    out.append(c)
+            else:  # already a JudgeCriterionVerdict — let pydantic pass it through
+                out.append(c)
+        return out
+
+
+class JudgeBatch(BaseModel):
+    people: list[JudgePersonVerdict] = []
+
+    @field_validator("people", mode="before")
+    @classmethod
+    def _drop_bad_people(cls, v):
+        if not v:
+            return []
+        out = []
+        for p in (v if isinstance(v, list) else [v]):
+            if isinstance(p, dict):
+                if p.get("person_id"):
+                    out.append(p)
+            else:  # already a JudgePersonVerdict
+                out.append(p)
+        return out
+
+
 # ─────────────────── validated LLM output: query ───────────────────
 
 
@@ -555,3 +643,7 @@ class SearchResponse(BaseModel):
     external: ExternalBucket
     llm_provider: str | None = None
     llm_model: str | None = None
+    #: V4 PART 3 §32 — optional observability block for the exhaustive judge run
+    #: (mode, status, candidate/batch counts, providers). Backward-compatible:
+    #: absent on searches that did not run the judge.
+    judge_metadata: dict[str, Any] | None = None

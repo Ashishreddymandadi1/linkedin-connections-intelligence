@@ -459,6 +459,14 @@ def bulk_embeddings_by_person(db: Session, person_ids: list[str]) -> dict[str, b
     return {pid: vec for pid, vec in rows}
 
 
+def bulk_volunteering(db: Session, person_ids: list[str]) -> dict[str, list[Volunteering]]:
+    return _bulk_by_person(db, Volunteering, person_ids, order_col=Volunteering.order_index)
+
+
+def bulk_recommendations(db: Session, person_ids: list[str]) -> dict[str, list[Recommendation]]:
+    return _bulk_by_person(db, Recommendation, person_ids, order_col=Recommendation.order_index)
+
+
 def _bulk_by_person(db: Session, model, person_ids: list[str], *, order_col=None) -> dict[str, list]:
     if not person_ids:
         return {}

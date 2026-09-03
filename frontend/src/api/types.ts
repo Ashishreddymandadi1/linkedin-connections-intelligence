@@ -176,4 +176,23 @@ export interface SearchResponse {
   };
   llm_provider: string | null;
   llm_model: string | null;
+  // V4 PART 3 §32 — observability for the exhaustive semantic-judge run.
+  // Absent on searches that did not run the judge; frontend rendering comes later.
+  judge_metadata?: {
+    mode: "off" | "uncertain_only" | "all_viable";
+    status: "full" | "partial" | "not_used" | "unavailable";
+    network_size: number;
+    candidate_pool_size: number;
+    hard_fact_rejected_count: number;
+    viable_candidate_count: number;
+    judge_candidate_count: number;
+    judge_batch_count: number;
+    judge_successful_batches: number;
+    judge_failed_batches: number;
+    capped: boolean;
+    omitted_people: number;
+    omitted_criteria: number;
+    providers: Record<string, number>;
+    models: string[];
+  } | null;
 }
