@@ -694,6 +694,11 @@ def _score_one(
         if crit.type in (CriterionType.CAREER_TRANSITION, CriterionType.YEARS_EXPERIENCE):
             return _score_chronology(facts, crit, ctx)
 
+        # tri-state NOT for a verified structured fact (V4 PART 3.5 §3) — absence
+        # of DATA is UNKNOWN, never a satisfied NOT.
+        if crit.operator == Operator.NOT and crit.type in _NOT_TRISTATE_TYPES:
+            return _score_structured_not(facts, crit, ctx)
+
         if crit.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY):
             want = _want_current_for(crit)
             rids = ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None
@@ -707,6 +712,73 @@ def _score_one(
         return s, e, None
     except Exception:  # noqa: BLE001 — a matcher bug must not kill a search
         return 0.0, [], None
+
+
+#: structured fact types where a required NOT must be tri-state, not "absent
+#: data == satisfied" (V4 PART 3.5 §3).
+_NOT_TRISTATE_TYPES = {
+    CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY,
+    CriterionType.LOCATION, CriterionType.EDUCATION,
+}
+#: profile_completeness at/above which a NOT past-company / NOT school can be
+#: called TRUE from absence alone.
+_NOT_ABSENCE_COMPLETENESS = 70
+
+
+def _current_employer_known(facts: ProfileFacts) -> bool:
+    return bool(facts.person.current_company) or any(
+        getattr(e, "is_current", False) for e in facts.experiences
+    )
+
+
+def _score_structured_not(
+    facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
+) -> tuple[float, list[EvidenceItem], str]:
+    """Tri-state NOT for a verified structured fact:
+      excluded value verifiably PRESENT (in scope)  -> FALSE
+      verifiably ABSENT + the relevant section is reliable -> TRUE
+      section unknown / not reliable                 -> UNKNOWN
+    """
+    vals = [v for v in (crit.values or ([crit.value] if crit.value else [])) if v]
+
+    if crit.type in (CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY):
+        want = _want_current_for(crit)
+        rids = ctx.company_ids_by_criterion.get(crit.id) if settings.company_id_matching else None
+        present = max(
+            (_score_company(facts, v, want_current=want, resolved_ids=rids)[0] for v in vals),
+            default=0.0,
+        )
+        if present >= _REQUIRED_MIN:
+            return 0.0, [EvidenceItem(type="experience",
+                                      text=f"is at an excluded company ({' / '.join(vals)})", detail={})], TriState.FALSE
+        if crit.type == CriterionType.CURRENT_COMPANY:
+            reliable = _current_employer_known(facts)
+        else:  # NOT previously at X — trust absence only with a strongly-complete history
+            reliable = (bool(facts.experiences)
+                        and (facts.person.profile_completeness or 0) >= _NOT_ABSENCE_COMPLETENESS
+                        and all(getattr(e, "start_year", None) for e in facts.experiences))
+        return _not_true_or_unknown(reliable, f"no excluded-company ({' / '.join(vals)}) role")
+
+    if crit.type == CriterionType.LOCATION:
+        present = max((_score_location(facts, v)[0] for v in vals), default=0.0)
+        if present >= _REQUIRED_MIN:
+            return 0.0, [EvidenceItem(type="location", text="located in an excluded place", detail={})], TriState.FALSE
+        p = facts.person
+        reliable = bool(p.location_text or getattr(p, "city", None) or getattr(p, "state", None))
+        return _not_true_or_unknown(reliable, "location is not an excluded place")
+
+    # EDUCATION
+    present = max((_score_education(facts, v)[0] for v in vals), default=0.0)
+    if present >= _REQUIRED_MIN:
+        return 0.0, [EvidenceItem(type="education", text="attended an excluded school", detail={})], TriState.FALSE
+    reliable = bool(facts.education) and (facts.person.profile_completeness or 0) >= _NOT_ABSENCE_COMPLETENESS
+    return _not_true_or_unknown(reliable, "no excluded school in the education history")
+
+
+def _not_true_or_unknown(reliable: bool, true_text: str) -> tuple[float, list[EvidenceItem], str]:
+    if reliable:
+        return 1.0, [EvidenceItem(type="experience", text=true_text, detail={})], TriState.TRUE
+    return 0.5, [], TriState.UNKNOWN
 
 
 def _combine_over_values(crit: SearchCriterion, scorer) -> tuple[float, list[EvidenceItem]]:
@@ -810,7 +882,7 @@ def score_candidate(
         ))
 
         if crit.required:
-            if crit.type in _SEMANTIC_TYPES:
+            if status is not None:  # semantic tri-state OR structured-NOT tri-state (§3)
                 if status == TriState.FALSE:
                     unmet.append(_label(crit))
                 elif status != TriState.TRUE:

@@ -64,22 +64,49 @@ def test_not_current_company_verified_present_is_rejected():
     assert d.viable is False
 
 
-def test_required_past_company_absent_from_history_is_rejected():
+def _past_plan():
+    return _plan(_c(id="past", type=CriterionType.PAST_COMPANY, value="Amazon",
+                    scope=Scope.PAST_COMPANY))
+
+
+def test_strongly_complete_history_with_amazon_absent_is_rejected():
+    # V4 PART 3.5 §4 — completeness >= 70, >= 3 roles, ALL dated
+    p = _Person(completeness=85)
+    exps = [_Exp("SWE", "Stripe", 2016, 2019, False, id="e1"),
+            _Exp("SWE", "Datadog", 2019, 2022, False, id="e2"),
+            _Exp("Staff SWE", "Ramp", 2022, None, True, id="e3")]
+    assert hard_gate(_facts(p, exps), _past_plan(), ScoringContext()).viable is False
+
+
+def test_partial_history_with_amazon_absent_stays_viable():
+    # only 2 roles -> not authoritative -> keep viable, let the judge look
     p = _Person(completeness=85)
     exps = [_Exp("SWE", "Stripe", 2019, 2022, False, id="e1"),
             _Exp("SWE", "Datadog", 2022, None, True, id="e2")]
-    d = hard_gate(_facts(p, exps),
-                  _plan(_c(id="past", type=CriterionType.PAST_COMPANY, value="Amazon",
-                           scope=Scope.PAST_COMPANY)), ScoringContext())
-    assert d.viable is False
+    d = hard_gate(_facts(p, exps), _past_plan(), ScoringContext())
+    assert d.viable is True and d.hard_fact_statuses["past"] == TriState.UNKNOWN
+
+
+def test_undated_role_makes_history_non_authoritative():
+    # 3 roles but one has no start year -> we can't trust the absence
+    p = _Person(completeness=90)
+    exps = [_Exp("SWE", "Stripe", 2016, 2019, False, id="e1"),
+            _Exp("Contractor", "Unknown", None, None, False, id="e2"),
+            _Exp("Staff SWE", "Ramp", 2022, None, True, id="e3")]
+    assert hard_gate(_facts(p, exps), _past_plan(), ScoringContext()).viable is True
+
+
+def test_low_completeness_history_with_amazon_absent_stays_viable():
+    p = _Person(completeness=45)
+    exps = [_Exp("SWE", "Stripe", 2016, 2019, False, id="e1"),
+            _Exp("SWE", "Datadog", 2019, 2022, False, id="e2"),
+            _Exp("Staff SWE", "Ramp", 2022, None, True, id="e3")]
+    assert hard_gate(_facts(p, exps), _past_plan(), ScoringContext()).viable is True
 
 
 def test_required_past_company_no_history_stays_viable():
     p = _Person(completeness=0)
-    d = hard_gate(_facts(p, exps=[]),
-                  _plan(_c(id="past", type=CriterionType.PAST_COMPANY, value="Amazon",
-                           scope=Scope.PAST_COMPANY)), ScoringContext())
-    assert d.viable is True
+    assert hard_gate(_facts(_Person(completeness=0), exps=[]), _past_plan(), ScoringContext()).viable is True
 
 
 def test_high_confidence_false_company_category_is_rejected():

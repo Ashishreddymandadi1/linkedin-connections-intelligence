@@ -9,15 +9,19 @@ A verdict is rejected / downgraded when:
   * a cited evidence reference does not exist in that person's exact packet
   * a TRUE verdict has no surviving supporting reference and the deterministic
     scorer does not independently agree
+  * a FALSE verdict on a semantic type has neither valid CONTRADICTING evidence,
+    nor an independent deterministic contradiction, nor an explicitly justified
+    complete-data negative — missing evidence is UNKNOWN, never FALSE
+    (V4 PART 3.5 §1); an unsupported FALSE can never override a deterministic TRUE
   * the supporting evidence is out of scope (claims CURRENT from a past-only
     experience, or PAST from a current-only one)
   * a company-category TRUE contradicts a cached HIGH-CONFIDENCE opposite
     classification (locked fact wins)
   * an employment concept ("faculty appointment", "works as …") is supported
-    only by an education row (studying somewhere ≠ working there)
+    only by an education / publication row (studying / publishing ≠ working there)
 
-Downgraded TRUE -> UNKNOWN (fall back to the deterministic scorer); a locked
-contradiction forces FALSE.
+Downgraded TRUE / FALSE -> UNKNOWN (fall back to the deterministic scorer); a
+locked contradiction forces FALSE.
 """
 from __future__ import annotations
 
@@ -39,6 +43,14 @@ _PASSIVE_MENTEE_RE = re.compile(
 )
 _MENTOR_CONCEPT_RE = re.compile(
     r"\b(mentor|coach|advis|guiding others|develop(?:ing)? people|people management)\b", re.I,
+)
+#: reason text that explicitly claims the data was COMPLETE enough to conclude a
+#: negative — the only way a FALSE with no contradicting ref may stand (§1).
+_COMPLETE_DATA_NEGATIVE_RE = re.compile(
+    r"\b(entire career|whole career|every (?:role|position|job)|all (?:roles|positions|jobs)|"
+    r"throughout (?:their|his|her) career|full (?:work )?history|complete (?:work )?history|"
+    r"none of (?:the|their) (?:roles|positions)|no such (?:role|experience) (?:in|across) "
+    r"(?:the|their) (?:complete|entire|full))\b", re.I,
 )
 
 
@@ -99,10 +111,11 @@ def _validate_one(raw: dict, crit: SearchCriterion, facts: ProfileFacts, ctx: Sc
 
         concept = (crit.concept or crit.value or "").lower()
         if status == TriState.TRUE and _EMPLOYMENT_CONCEPT_RE.search(concept):
-            non_edu = [r for r in sup if not r.startswith("edu:")]
-            if sup and not non_edu:
+            non_employment = [r for r in sup if not r.startswith(("edu:", "pub:"))]
+            if sup and not non_employment:
                 status, downgraded = TriState.UNKNOWN, True
-                notes.append("employment concept supported only by an education row (studying ≠ working)")
+                notes.append("employment concept supported only by an education / publication row "
+                             "(studying / publishing ≠ working there)")
 
         if status == TriState.TRUE and _MENTOR_CONCEPT_RE.search(concept) \
                 and _PASSIVE_MENTEE_RE.search(raw.get("reason", "")):
@@ -110,13 +123,29 @@ def _validate_one(raw: dict, crit: SearchCriterion, facts: ProfileFacts, ctx: Sc
             notes.append("evidence describes receiving mentorship, not giving it")
 
         if status == TriState.TRUE and not sup:
-            if not _deterministic_true(crit, facts, ctx):
+            if _deterministic_status(crit, facts, ctx) != TriState.TRUE:
                 status, downgraded = TriState.UNKNOWN, True
                 notes.append("no valid supporting evidence reference and deterministic scorer does not agree")
 
+    # ── FALSE must be GROUNDED (V4 PART 3.5 §1) ────────────────────────
+    if status == TriState.FALSE:
+        det_status = _deterministic_status(crit, facts, ctx)
+        has_contradiction = bool(con)
+        det_agrees = det_status == TriState.FALSE
+        explicit_complete = bool(_COMPLETE_DATA_NEGATIVE_RE.search(raw.get("reason", "")))
+        if not (has_contradiction or det_agrees or explicit_complete):
+            status, downgraded = TriState.UNKNOWN, True
+            notes.append("FALSE has no contradicting evidence ref, no deterministic contradiction, "
+                         "and no explicit complete-data negative — downgraded to UNKNOWN (missing "
+                         "evidence is not FALSE)")
+        elif det_status == TriState.TRUE and not has_contradiction:
+            # an unsupported FALSE cannot override a verified deterministic TRUE
+            status, downgraded = TriState.UNKNOWN, True
+            notes.append("deterministic scorer independently verifies TRUE — unsupported FALSE ignored")
+
     if crit.type == CriterionType.COMPANY_CATEGORY:
-        _s, _ev, det_status = _score_company_category(facts, crit, ctx)
-        if det_status == TriState.FALSE and status != TriState.FALSE:
+        _s, _ev, det_cc = _score_company_category(facts, crit, ctx)
+        if det_cc == TriState.FALSE and status != TriState.FALSE:
             notes.append("cached high-confidence classification is opposite — locked FALSE wins")
             return _verdict(TriState.FALSE, 0.0, raw, sup, con, raw_exp_ids, notes=notes, downgraded=True)
 
@@ -127,9 +156,10 @@ def _validate_one(raw: dict, crit: SearchCriterion, facts: ProfileFacts, ctx: Sc
     return _verdict(status, strength, raw, sup, con, raw_exp_ids, notes=notes, downgraded=downgraded)
 
 
-def _deterministic_true(crit: SearchCriterion, facts: ProfileFacts, ctx: ScoringContext) -> bool:
-    """Would the local scorer independently call this TRUE? Lets a well-grounded
-    judgement stand even when the model forgot to cite a ref."""
+def _deterministic_status(crit: SearchCriterion, facts: ProfileFacts, ctx: ScoringContext) -> str:
+    """The local scorer's independent tri-state for this criterion. Lets a
+    well-grounded judgement stand when the model forgot a ref, and stops an
+    unsupported FALSE from burying a verified TRUE."""
     from app.services.scoring import _score_one
 
     try:
@@ -141,9 +171,9 @@ def _deterministic_true(crit: SearchCriterion, facts: ProfileFacts, ctx: Scoring
             ScoringContext(company_class=ctx.company_class,
                            company_ids_by_criterion=ctx.company_ids_by_criterion),
         )
-        return det_status == TriState.TRUE
+        return det_status or TriState.UNKNOWN
     except Exception:  # noqa: BLE001
-        return False
+        return TriState.UNKNOWN
 
 
 def _verdict(status, strength, raw, sup, con, exp_ids, *, notes, downgraded=False, judge_missing=False) -> dict:

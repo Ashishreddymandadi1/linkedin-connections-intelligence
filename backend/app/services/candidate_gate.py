@@ -41,9 +41,22 @@ from app.services.scoring import (
     _want_current_for,
 )
 
-#: profile_completeness at/above which "not found" in a populated section is
-#: treated as a reliable negative for the gate.
-_COMPLETE_ENOUGH = 40
+#: V4 PART 3.5 §4 — a MISSING required past employer / school is treated as an
+#: authoritative negative (safe to hard-reject before the judge) ONLY when the
+#: section is *strongly* complete. Anything short of this keeps the candidate
+#: VIABLE and lets the exhaustive judge look. Old, undated experience is exactly
+#: the false-negative risk this guards against.
+#:
+#:   past company absence is authoritative iff:
+#:     - profile_completeness >= 70, AND
+#:     - >= 3 work experiences, AND
+#:     - EVERY work experience has a start year (no undated gap in the history)
+#:
+#:   school absence is authoritative iff:
+#:     - profile_completeness >= 70, AND
+#:     - at least one education row is present
+_STRONG_COMPLETENESS = 70
+_MIN_ROLES_FOR_ABSENCE = 3
 
 
 @dataclass
@@ -91,7 +104,13 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
                     return _reject(pid, crit,
                                    f"verifiably still at excluded company {crit.values or [crit.value]}",
                                    statuses, locked)
-                statuses[crit.id] = TriState.TRUE
+                # absence of DATA is not proof of NOT (V4 PART 3.5 §3)
+                if _has_current_employer(facts):
+                    statuses[crit.id] = TriState.TRUE
+                    locked[crit.id] = {"status": TriState.TRUE,
+                                       "detail": "current employer verified, not the excluded one"}
+                else:
+                    statuses[crit.id] = TriState.UNKNOWN
                 continue
             if matched > 0:
                 statuses[crit.id] = TriState.TRUE
@@ -110,22 +129,22 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
             if _company_strength(facts, crit, want_current=want, ctx=ctx) > 0:
                 statuses[crit.id] = TriState.TRUE
                 locked[crit.id] = {"status": TriState.TRUE, "detail": "verified in work history"}
-            elif _has_work_history(facts):
+            elif _history_is_authoritative(facts):
                 return _reject(pid, crit,
-                               f"no {crit.values or [crit.value]} role in an otherwise-complete "
-                               f"work history", statuses, locked)
+                               f"no {crit.values or [crit.value]} role in a strongly-complete, "
+                               f"fully-dated work history", statuses, locked)
             else:
-                statuses[crit.id] = TriState.UNKNOWN
+                statuses[crit.id] = TriState.UNKNOWN  # history not complete enough to trust absence
             continue
 
         # ── required school ────────────────────────────────────
         if crit.type == CriterionType.EDUCATION and crit.operator != Operator.NOT:
             if _education_strength(facts, crit) > 0:
                 statuses[crit.id] = TriState.TRUE
-            elif _has_education_history(facts):
+            elif _education_is_authoritative(facts):
                 return _reject(pid, crit,
-                               f"{crit.values or [crit.value]} absent from a populated education "
-                               f"history", statuses, locked)
+                               f"{crit.values or [crit.value]} absent from a strongly-complete "
+                               f"education history", statuses, locked)
             else:
                 statuses[crit.id] = TriState.UNKNOWN
             continue
@@ -173,10 +192,20 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
 # ─────────────────────── data-completeness helpers ───────────────────────
 
 
-def _has_work_history(facts: ProfileFacts) -> bool:
-    return bool(facts.experiences) and (
-        (facts.person.profile_completeness or 0) >= _COMPLETE_ENOUGH or len(facts.experiences) >= 2
-    )
+def _history_is_authoritative(facts: ProfileFacts) -> bool:
+    """True only when the work history is strongly complete enough to treat a
+    MISSING employer as a real negative (V4 PART 3.5 §4)."""
+    exps = facts.experiences
+    if len(exps) < _MIN_ROLES_FOR_ABSENCE:
+        return False
+    if (facts.person.profile_completeness or 0) < _STRONG_COMPLETENESS:
+        return False
+    # any undated role => we can't be sure what the person did in that gap
+    return all(getattr(e, "start_year", None) for e in exps)
+
+
+def _education_is_authoritative(facts: ProfileFacts) -> bool:
+    return bool(facts.education) and (facts.person.profile_completeness or 0) >= _STRONG_COMPLETENESS
 
 
 def _has_current_employer(facts: ProfileFacts) -> bool:
@@ -188,10 +217,6 @@ def _has_current_employer(facts: ProfileFacts) -> bool:
 def _has_location(facts: ProfileFacts) -> bool:
     p = facts.person
     return bool(p.location_text or getattr(p, "city", None) or getattr(p, "state", None))
-
-
-def _has_education_history(facts: ProfileFacts) -> bool:
-    return bool(facts.education) and (facts.person.profile_completeness or 0) >= _COMPLETE_ENOUGH
 
 
 # ─────────────────────── deterministic-scorer wrappers ───────────────────────

@@ -58,6 +58,13 @@ def _matches(text: str | None, toks: set[str]) -> int:
     return sum(1 for t in toks if t in low)
 
 
+def _ref(prefix: str, row, idx: int) -> str:
+    """Stable evidence reference — the real normalized id when available,
+    otherwise a packet-local index (V4 PART 3.5 §2)."""
+    rid = getattr(row, "id", None)
+    return f"{prefix}:{rid}" if rid else f"{prefix}:{idx}"
+
+
 def build_packets(
     bundle: list[tuple], parsed: ParsedSearchQuery, ctx: ScoringContext, *, query: str,
 ) -> list[dict]:
@@ -99,6 +106,11 @@ def packet_refs(packet: dict) -> set[str]:
     for cc in packet.get("company_classifications", []):
         if cc.get("ref"):
             refs.add(cc["ref"])
+    # V4 PART 3.5 §2 — publications / volunteering / recommendations are grounded
+    for key in ("publications", "volunteering", "recommendations_received"):
+        for item in packet.get(key, []):
+            if isinstance(item, dict) and item.get("ref"):
+                refs.add(item["ref"])
     return refs
 
 
@@ -221,19 +233,32 @@ def _one_packet(person, facts: ProfileFacts, extras: dict, ctx: ScoringContext, 
             {"ref": f"cert:{c.id}", "certification_id": c.id, "name": c.name}
             for c in facts.certifications if c.name
         ][:15],
-        "publications": [p.title for p in facts.publications if p.title][:8],
+        "publications": [
+            {"ref": _ref("pub", p, i), "publication_id": getattr(p, "id", None),
+             "title": p.title, "description": (getattr(p, "description", "") or "")[:240] or None}
+            for i, p in enumerate(facts.publications[:8]) if p.title
+        ],
         "semantic_assertions": assertions,
     }
 
-    vol_hay = " ".join(f"{v.role} {v.organization}" for v in vols)
+    vol_hay = " ".join(f"{v.role} {v.organization} {v.description or ''}" for v in vols)
     if want_mentor_context or _matches(vol_hay, toks):
         packet["volunteering"] = [
-            {"role": v.role, "organization": v.organization, "description": (v.description or "")[:300]}
-            for v in vols[:8]
+            {"ref": _ref("vol", v, i), "volunteering_id": getattr(v, "id", None),
+             "role": v.role, "organization": v.organization, "description": (v.description or "")[:300]}
+            for i, v in enumerate(vols[:8])
         ]
-        packet["recommendations_received"] = [(r.text or "")[:400] for r in recs[:5] if r.text]
+        packet["recommendations_received"] = [
+            {"ref": _ref("rec", r, i), "recommendation_id": getattr(r, "id", None),
+             "relationship": getattr(r, "relationship", None), "text": (r.text or "")[:400]}
+            for i, r in enumerate(recs[:5]) if r.text
+        ]
     elif vols:
-        packet["volunteering"] = [{"role": v.role, "organization": v.organization} for v in vols[:6]]
+        packet["volunteering"] = [
+            {"ref": _ref("vol", v, i), "volunteering_id": getattr(v, "id", None),
+             "role": v.role, "organization": v.organization}
+            for i, v in enumerate(vols[:6])
+        ]
 
     if want_academia_context:
         packet["education"] = [
