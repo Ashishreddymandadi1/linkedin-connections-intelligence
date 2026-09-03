@@ -94,12 +94,19 @@ export function ScoreMeter({
   );
 }
 
-export function Badge({ children, tone = "default" }: { children: ReactNode; tone?: "default" | "accent" | "fact" | "inferred" }) {
+export function Badge({
+  children,
+  tone = "default",
+}: {
+  children: ReactNode;
+  tone?: "default" | "accent" | "fact" | "inferred" | "warn";
+}) {
   const cls = {
     default: "bg-slate-100 text-ink-soft",
     accent: "bg-accent-soft text-accent",
     fact: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
     inferred: "bg-violet-50 text-violet-700 ring-1 ring-violet-200",
+    warn: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
   }[tone];
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>

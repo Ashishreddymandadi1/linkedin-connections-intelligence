@@ -128,6 +128,12 @@ export interface SearchResultItem {
   match_score: number;
   data_confidence: number;
   reason: string;
+  // V4 §22-25 — exact_match / possible_match / not_match (near-match rows only).
+  qualification: "exact_match" | "possible_match" | "not_match";
+  // required criteria still uncertain — why this is possible_match, not exact.
+  uncertain_criteria: string[];
+  // required criteria this person FAILS — near-match rows only.
+  unmet_criteria: string[];
   matched_criteria: string[];
   score_breakdown: ScoreComponent[];
   evidence: EvidenceItem[];
@@ -173,6 +179,11 @@ export interface SearchResponse {
     total_candidates: number;
     returned: number;
     results: SearchResultItem[];
+    // V4 §22-26 — tier counts + candidates that miss exactly one required
+    // criterion (clearly labelled, never mixed into `results`).
+    exact_match_count: number;
+    possible_match_count: number;
+    near_matches: SearchResultItem[];
   };
   external: {
     searched: boolean;

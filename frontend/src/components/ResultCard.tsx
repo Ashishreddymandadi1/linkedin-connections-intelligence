@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ExternalLink } from "lucide-react";
+import { ChevronDown, ExternalLink, ShieldCheck } from "lucide-react";
 import type { SearchResultItem } from "../api/types";
 import { evidenceProvenance } from "../api/types";
 import { initials } from "../lib/format";
@@ -18,8 +18,26 @@ const PROVENANCE_TONE: Record<string, "fact" | "inferred"> = {
   relevance: "inferred",
 };
 
-export function ResultCard({ item }: { item: SearchResultItem }) {
+export function QualificationBadge({ item }: { item: SearchResultItem }) {
+  if (item.qualification === "exact_match") return <Badge tone="fact">Exact match</Badge>;
+  if (item.qualification === "possible_match") return <Badge tone="warn">Possible match</Badge>;
+  return <Badge tone="default">Near match</Badge>;
+}
+
+export function ResultCard({
+  item,
+  variant = "main",
+}: {
+  item: SearchResultItem;
+  variant?: "main" | "near";
+}) {
   const [open, setOpen] = useState(false);
+
+  const isNear = variant === "near";
+  const showNeedsVerification =
+    !isNear && item.qualification === "possible_match" && item.uncertain_criteria.length > 0;
+  const showAuditDetail =
+    !isNear && (item.audit_decision === "downgrade" || item.audit_decision === "unknown");
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-card shadow-card">
@@ -36,15 +54,31 @@ export function ResultCard({ item }: { item: SearchResultItem }) {
           </span>
         )}
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="truncate font-semibold">{item.name ?? "Unknown"}</span>
             {item.is_connection && <Badge tone="accent">Connection</Badge>}
+            <QualificationBadge item={item} />
+            {!isNear && item.llm_verified && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200">
+                <ShieldCheck size={12} /> Final audit verified
+              </span>
+            )}
           </div>
           <div className="truncate text-sm text-ink-soft">
             {item.current_title ?? "—"}
             {item.current_company ? ` — ${item.current_company}` : ""}
             {item.location ? ` · ${item.location}` : ""}
           </div>
+          {showNeedsVerification && (
+            <div className="mt-1 text-xs text-amber-700">
+              Needs verification: {item.uncertain_criteria.join("; ")}
+            </div>
+          )}
+          {isNear && item.unmet_criteria.length > 0 && (
+            <div className="mt-1 text-xs text-ink-faint">
+              Missing: {item.unmet_criteria.join("; ")}
+            </div>
+          )}
         </div>
         <div className="w-40 shrink-0">
           <ScoreMeter label="Match" value={item.match_score} emphasis />
@@ -66,6 +100,54 @@ export function ResultCard({ item }: { item: SearchResultItem }) {
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Why they match</div>
             <p className="mt-1 text-ink">{item.reason}</p>
           </div>
+
+          {showNeedsVerification && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Needs verification</div>
+              <ul className="mt-1 space-y-1">
+                {item.uncertain_criteria.map((c, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="text-amber-600">•</span>
+                    <span>{c}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {showAuditDetail && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Audit</div>
+              <p className="mt-1 text-ink">
+                {item.audit_decision === "downgrade" ? "Downgraded" : "Uncertain"}
+                {item.audit_reason ? ` — ${item.audit_reason}` : ""}
+              </p>
+              {item.audit_issues && item.audit_issues.length > 0 && (
+                <ul className="mt-1 space-y-1 text-ink-soft">
+                  {item.audit_issues.map((c, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="text-ink-faint">•</span>
+                      <span>{c}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {isNear && item.unmet_criteria.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Missing requirement</div>
+              <ul className="mt-1 space-y-1">
+                {item.unmet_criteria.map((c, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="text-ink-faint">•</span>
+                    <span>{c}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {item.score_breakdown.length > 0 && (
             <div>
