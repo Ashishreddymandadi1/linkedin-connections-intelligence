@@ -218,6 +218,9 @@ export interface SearchResponse {
     downgraded: number;
     incorrect: number;
     unknown: number;
+    // V4 PART 5.5 §4 — required-criterion reviews the auditor omitted
+    missing_required_reviews: number;
+    candidates_with_incomplete_reviews: number;
     providers: Record<string, number>;
     models: string[];
   } | null;

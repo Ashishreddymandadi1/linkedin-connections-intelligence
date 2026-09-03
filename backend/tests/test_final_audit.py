@@ -150,25 +150,32 @@ def _mentor_plan():
 
 
 def test_senior_engineer_with_no_management_is_removed_by_audit():
+    # PART 5.5: a career-scoped "unsupported" needs broad coverage of a complete
+    # history — here 3 dated IC roles, completeness 80, all cited.
     plan = _mentor_plan()
-    facts = _pf(_Person(current_title="Senior Backend Engineer"),
-                [_Exp("Senior Backend Engineer", "Co", 2019, None, True, id="cur",
-                      desc="built backend services")])
+    facts = _pf(_Person(current_title="Senior Backend Engineer", completeness=80),
+                [_Exp("Backend Engineer", "A", 2013, 2016, False, id="e1", desc="built services"),
+                 _Exp("Senior Backend Engineer", "B", 2016, 2019, False, id="e2", desc="built services"),
+                 _Exp("Senior Backend Engineer", "C", 2019, None, True, id="e3", desc="built services")])
+    packet = _packet(current={"experience_id": "e3", "is_current": True},
+                     past=[{"experience_id": "e1", "is_current": False},
+                           {"experience_id": "e2", "is_current": False}])
     ctx = ScoringContext()
     ctx.judge_results["p0"] = {
         "mgmt": {"status": TriState.TRUE, "match_strength": 0.8},
         "mentor": {"status": TriState.TRUE, "match_strength": 0.8},
     }
     raw = {"person_id": "p0", "decision": "incorrect", "confidence": 0.9,
-           "reason": "no management or mentoring anywhere in the career",
+           "reason": "no management or mentoring in every role across the full work history",
            "criteria": [
                {"criterion_id": "mgmt", "status_review": "unsupported",
-                "reason": "every role is an individual-contributor engineer",
-                "contradicting_evidence_refs": ["exp:cur"]},
+                "reason": "every role across the full history is an individual contributor",
+                "contradicting_evidence_refs": ["exp:e1", "exp:e2", "exp:e3"]},
                {"criterion_id": "mentor", "status_review": "unsupported",
-                "reason": "no mentoring evidence", "contradicting_evidence_refs": ["exp:cur"]},
+                "reason": "no mentoring in any of the roles",
+                "contradicting_evidence_refs": ["exp:e1", "exp:e2", "exp:e3"]},
            ]}
-    out = validate_audit(raw, _packet(), plan, facts, ctx,
+    out = validate_audit(raw, packet, plan, facts, ctx,
                          first_pass_qualification=Qualification.EXACT_MATCH)
     assert out["decision"] == AuditDecision.INCORRECT
     assert out["applied_qualification"] == Qualification.NOT_MATCH

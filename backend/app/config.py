@@ -5,9 +5,13 @@ non-empty default and are never logged (see ``logging_config.redact``).
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_log = logging.getLogger("app.config")
 
 
 class Settings(BaseSettings):
@@ -125,8 +129,10 @@ class Settings(BaseSettings):
     #: ONE grounded LLM review of the candidates about to be shown. Downgrade /
     #: remove only — it can never upgrade POSSIBLE->EXACT or invent a score.
     final_result_audit_enabled: bool = True
-    #: how many results the search returns after the audit; the audit itself runs
-    #: over TOP_N + BUFFER so a removal can be back-filled without a 2nd LLM call.
+    #: DEPRECATED (V4 PART 5.5 §20) — ``top_connections`` is the ONE authoritative
+    #: user-facing result count. Kept only so old .env files don't error; a value
+    #: that disagrees with ``top_connections`` is ignored (with a startup log
+    #: warning). The audit pool is ``top_connections + final_result_audit_buffer``.
     final_result_audit_top_n: int = 20
     final_result_audit_buffer: int = 10
     final_result_audit_batch_size: int = 10   # candidates per audit request (never 1/candidate)
@@ -145,6 +151,16 @@ class Settings(BaseSettings):
     # ── App ──────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _warn_audit_top_n_drift(self) -> "Settings":
+        if self.final_result_audit_top_n != self.top_connections:
+            _log.warning(
+                "FINAL_RESULT_AUDIT_TOP_N=%d disagrees with TOP_CONNECTIONS=%d — "
+                "TOP_CONNECTIONS is authoritative; FINAL_RESULT_AUDIT_TOP_N is deprecated and ignored.",
+                self.final_result_audit_top_n, self.top_connections,
+            )
+        return self
 
     @property
     def is_development(self) -> bool:

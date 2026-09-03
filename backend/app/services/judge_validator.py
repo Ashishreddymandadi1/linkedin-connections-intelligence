@@ -64,6 +64,16 @@ _COMPLETE_DATA_NEGATIVE_RE = re.compile(
 _CURRENT_SCOPES = (Scope.CURRENT, Scope.CURRENT_COMPANY)
 _PAST_SCOPES = (Scope.PAST, Scope.PAST_COMPANY)
 
+#: criterion types where the deterministic / code-authoritative scorer is the
+#: authority — an LLM "this is FALSE / unsupported" cannot overturn a verified
+#: TRUE, and a verified FALSE stands on its own (V4 PART 3.6 §16 / PART 5.5 §9).
+_FACT_AUTHORITATIVE_TYPES = {
+    CriterionType.LOCATION, CriterionType.CURRENT_COMPANY, CriterionType.PAST_COMPANY,
+    CriterionType.EDUCATION, CriterionType.CERTIFICATION, CriterionType.LANGUAGE,
+    CriterionType.CAREER_TRANSITION, CriterionType.YEARS_EXPERIENCE,
+    CriterionType.COMPANY_CATEGORY,
+}
+
 
 # ─────────────────────── evidence-ref scope helpers (§6) ───────────────────────
 
@@ -114,6 +124,80 @@ def _scope_ok_for(crit_scope: str | None, refs: list[str], packet: dict, cur_map
     if crit_scope in _PAST_SCOPES:
         return any(s in ("past", "career") for s in scoped)
     return True
+
+
+def validate_negative_grounding(
+    crit: SearchCriterion,
+    facts: ProfileFacts,
+    ctx: ScoringContext,
+    packet: dict,
+    contradicting_refs: list[str],
+    reason: str,
+) -> tuple[bool, str]:
+    """ONE place that decides whether "this criterion is FALSE / not supported
+    for this person" is a GROUNDED conclusion. Shared by the first-pass judge
+    (a semantic FALSE verdict) and the final auditor (an 'unsupported' review of
+    a required criterion) — V4 PART 3.6 §1/§4/§5, PART 5.5 §5–§9/§16.
+
+    Grounded iff ONE of:
+      * scope-appropriate contradicting exp:/assertion: ref(s) — and for a
+        CAREER / ANY-scoped criterion, broad career coverage (same threshold as
+        the judge, no second percentage)
+      * the deterministic scorer independently returns FALSE
+      * an explicit complete-data-negative phrase in ``reason`` that the BACKEND
+        completeness policy independently supports
+
+    NEVER grounded when the deterministic / code-authoritative scorer verifies
+    the criterion TRUE and there is no scope-valid contradiction (§9/§16). For a
+    structured / code-authoritative fact type the deterministic verdict is the
+    sole authority.
+
+    Returns ``(grounded, note)``.
+    """
+    cur_map = packet_experience_current_map(packet)
+    valid = packet_refs(packet)
+    con = [r for r in (contradicting_refs or []) if r in valid]
+    det_status = _deterministic_status(crit, facts, ctx)
+
+    if crit.type in _FACT_AUTHORITATIVE_TYPES:
+        if det_status == TriState.TRUE:
+            return False, ("deterministic / code-authoritative scorer verifies this fact — "
+                           "the LLM objection is ignored")
+        if det_status == TriState.FALSE:
+            return True, "deterministic / code-authoritative scorer confirms this fact fails"
+
+    con_scope_ok = _scope_ok_for(crit.scope, con, packet, cur_map)
+    con_exp = [r for r in con if r.startswith(("exp:", "assertion:")) and con_scope_ok]
+    has_scoped_contradiction = bool(con_exp)
+    note = ""
+
+    # a criterion EXPLICITLY scoped to the whole career needs broad coverage for
+    # an absence claim — one or two roles do not prove a career-wide gap (§5).
+    # An unscoped criterion is point-in-time enough that a scope-valid
+    # contradiction suffices.
+    if has_scoped_contradiction and crit.scope in (Scope.CAREER, Scope.ANY_EXPERIENCE):
+        if not _career_coverage_ok(con_exp, cur_map):
+            has_scoped_contradiction = False
+            note = ("one or two experience refs do not prove a career-wide absence "
+                    "(V4 PART 3.6 §5) — need broad coverage, a deterministic FALSE, or "
+                    "authoritative complete-data")
+
+    det_agrees = det_status == TriState.FALSE
+    explicit_complete = (bool(_COMPLETE_DATA_NEGATIVE_RE.search(reason or ""))
+                         and _backend_absence_authoritative(crit, facts))
+
+    grounded = has_scoped_contradiction or det_agrees or explicit_complete
+    if grounded and det_status == TriState.TRUE and not has_scoped_contradiction:
+        return False, "deterministic scorer independently verifies TRUE — unsupported negative ignored"
+    if grounded:
+        return True, note or "grounded"
+    if not note:
+        if con and not con_scope_ok:
+            note = f"contradicting evidence is not in the criterion's '{crit.scope}' scope"
+        else:
+            note = ("not grounded — no scope-valid contradiction, no deterministic contradiction, "
+                    "no backend-authoritative complete-data negative")
+    return False, note
 
 
 # ─────────────────────── entry ───────────────────────
@@ -190,35 +274,13 @@ def _validate_one(raw: dict, crit: SearchCriterion, facts: ProfileFacts, ctx: Sc
                 status, downgraded = TriState.UNKNOWN, True
                 notes.append("no valid supporting evidence reference and deterministic scorer does not agree")
 
-    # ── FALSE must be GROUNDED, in scope, and (career-wide) covered ───
+    # ── FALSE must be GROUNDED (shared rule — V4 PART 3.6 §1 / PART 5.5 §5) ───
     if status == TriState.FALSE:
-        det_status = _deterministic_status(crit, facts, ctx)
-        con_scope_ok = _scope_ok_for(crit.scope, con, packet, cur_map)
-        con_exp = [r for r in con if r.startswith(("exp:", "assertion:")) and con_scope_ok]
-        has_scoped_contradiction = bool(con_exp)
-
-        # a CAREER / ANY-scoped absence-FALSE needs coverage of most of the career
-        if has_scoped_contradiction and crit.scope in (None, Scope.CAREER, Scope.ANY_EXPERIENCE):
-            if not _career_coverage_ok(con_exp, cur_map):
-                has_scoped_contradiction = False
-                notes.append("one or two experience refs do not prove a career-wide absence "
-                             "(V4 PART 3.6 §5) — need broad coverage, a deterministic FALSE, or "
-                             "authoritative complete-data")
-
-        det_agrees = det_status == TriState.FALSE
-        explicit_complete = (bool(_COMPLETE_DATA_NEGATIVE_RE.search(reason))
-                             and _backend_absence_authoritative(crit, facts))
-
-        if not (has_scoped_contradiction or det_agrees or explicit_complete):
-            if con and not con_scope_ok:
-                notes.append(f"contradicting evidence is not in the criterion's '{crit.scope}' scope")
+        grounded, gnote = validate_negative_grounding(crit, facts, ctx, packet, con, reason)
+        if not grounded:
             status, downgraded = TriState.UNKNOWN, True
-            notes.append("FALSE is not grounded (no scope-valid contradiction, no deterministic "
-                         "contradiction, no backend-authoritative complete-data negative) — "
-                         "downgraded to UNKNOWN (missing evidence is not FALSE)")
-        elif det_status == TriState.TRUE and not has_scoped_contradiction:
-            status, downgraded = TriState.UNKNOWN, True
-            notes.append("deterministic scorer independently verifies TRUE — unsupported FALSE ignored")
+            notes.append(gnote)
+            notes.append("missing evidence is not FALSE — downgraded to UNKNOWN")
 
     # ── locked company classification wins ───────────────────────────
     if crit.type == CriterionType.COMPANY_CATEGORY:
@@ -262,11 +324,15 @@ def _backend_absence_authoritative(crit: SearchCriterion, facts: ProfileFacts) -
 def _deterministic_status(crit: SearchCriterion, facts: ProfileFacts, ctx: ScoringContext) -> str:
     """The local scorer's independent tri-state for this criterion. Lets a
     well-grounded judgement stand when the model forgot a ref, and stops an
-    unsupported FALSE from burying a verified TRUE."""
-    from app.services.scoring import _score_one
+    unsupported FALSE / 'unsupported' review from burying a verified fact.
+
+    Semantic criteria already return a tri-state. Structured facts (company /
+    location / education / cert / language) return only a strength — a strong
+    in-scope match is TRUE, a clear miss is FALSE, anything else UNKNOWN."""
+    from app.services.scoring import _EXACT_MIN, _REQUIRED_MIN, _score_one
 
     try:
-        _s, _ev, det_status = _score_one(
+        s, _ev, det_status = _score_one(
             facts,
             SearchCriterion(id=f"_v_{crit.id}", type=crit.type, concept=crit.concept,
                             value=crit.value, values=crit.values, operator=crit.operator,
@@ -274,7 +340,13 @@ def _deterministic_status(crit: SearchCriterion, facts: ProfileFacts, ctx: Scori
             ScoringContext(company_class=ctx.company_class,
                            company_ids_by_criterion=ctx.company_ids_by_criterion),
         )
-        return det_status or TriState.UNKNOWN
+        if det_status is not None:
+            return det_status
+        if s >= _EXACT_MIN:
+            return TriState.TRUE
+        if s < _REQUIRED_MIN:
+            return TriState.FALSE
+        return TriState.UNKNOWN
     except Exception:  # noqa: BLE001
         return TriState.UNKNOWN
 

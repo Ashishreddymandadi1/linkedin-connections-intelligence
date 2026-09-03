@@ -92,6 +92,10 @@ class AuditMetadata:
     downgraded: int = 0
     incorrect: int = 0
     unknown: int = 0
+    #: V4 PART 5.5 §4 — required-criterion reviews the model omitted (total across
+    #: the pool) and how many candidates had at least one omitted required review.
+    missing_required_reviews: int = 0
+    candidates_with_incomplete_reviews: int = 0
     providers: dict[str, int] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
 
@@ -109,6 +113,8 @@ class AuditMetadata:
             "downgraded": self.downgraded,
             "incorrect": self.incorrect,
             "unknown": self.unknown,
+            "missing_required_reviews": self.missing_required_reviews,
+            "candidates_with_incomplete_reviews": self.candidates_with_incomplete_reviews,
             "providers": self.providers,
             "models": self.models,
         }
@@ -194,6 +200,33 @@ def run_final_audit(
              meta.requested_candidates, meta.audited_candidates,
              meta.successful_batches, meta.batch_count, meta.status)
     return AuditRun(decisions, packets_by_id, meta)
+
+
+def finalize(run: AuditRun, validated_by_id: dict[str, dict]) -> None:
+    """Recompute the decision tally + review-completeness counts from the
+    VALIDATED decisions and downgrade FULL -> PARTIAL when any required review
+    was omitted (V4 PART 5.5 §4). Called by search_service after validation; the
+    tests call it too."""
+    m = run.metadata
+    m.approved = m.downgraded = m.incorrect = m.unknown = 0
+    m.missing_required_reviews = 0
+    m.candidates_with_incomplete_reviews = 0
+    for v in validated_by_id.values():
+        d = v.get("decision", AuditDecision.UNKNOWN)
+        if d == AuditDecision.APPROVED:
+            m.approved += 1
+        elif d == AuditDecision.DOWNGRADE:
+            m.downgraded += 1
+        elif d == AuditDecision.INCORRECT:
+            m.incorrect += 1
+        else:
+            m.unknown += 1
+        mrr = int(v.get("missing_required_reviews", 0) or 0)
+        m.missing_required_reviews += mrr
+        if mrr:
+            m.candidates_with_incomplete_reviews += 1
+    if m.status == AuditStatus.FULL and (m.missing_required_reviews or m.candidates_with_incomplete_reviews):
+        m.status = AuditStatus.PARTIAL
 
 
 # ─────────────────────── payload / first-pass ───────────────────────

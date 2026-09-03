@@ -173,8 +173,9 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     total_scored = len(scored)
     exact_n = sum(1 for s in scored if s.qualification == Qualification.EXACT_MATCH)
     possible_n = sum(1 for s in scored if s.qualification == Qualification.POSSIBLE_MATCH)
+    # ONE authoritative user-facing result count (V4 PART 5.5 §20): TOP_CONNECTIONS.
     if audit_run is not None:
-        top = survivors[: settings.final_result_audit_top_n]  # audited candidates only
+        top = survivors[: settings.top_connections]  # audited candidates only
     else:
         top = _maybe_llm_rerank(db, query, scored[: settings.top_connections])
 
@@ -260,9 +261,12 @@ def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol
         return None, {}, scored, []
 
     from app.services.final_audit_validator import validate_audit
+    from app.services.final_auditor import finalize as _finalize_audit
     from app.services.final_auditor import run_final_audit
 
-    pool_n = max(1, settings.final_result_audit_top_n + settings.final_result_audit_buffer)
+    # audit pool = the user-facing count + a buffer, so a removal can be
+    # back-filled from candidates already audited in the same pass (§20).
+    pool_n = max(1, settings.top_connections + settings.final_result_audit_buffer)
     audit_pool = scored[:pool_n]
     tail = scored[pool_n:]
     bundle_by_id = {
@@ -273,7 +277,6 @@ def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol
         for c in audit_pool if c.person.id in facts_by_id
     }
     audit_run = run_final_audit(query, parsed, audit_pool, ctx, bundle_by_id=bundle_by_id)
-    meta = audit_run.metadata
 
     survivors: list[ScoredCandidate] = []
     audit_by_id: dict[str, dict] = {}
@@ -287,7 +290,6 @@ def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol
         )
         audit_run.decisions[cand.person.id] = v
         audit_by_id[cand.person.id] = v
-        _tally(meta, v["decision"])
 
         applied = v["applied_qualification"]
         if applied == Qualification.NOT_MATCH:
@@ -302,21 +304,9 @@ def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol
                                                  or ["downgraded by the final audit"]))
         survivors.append(nc)
 
+    _finalize_audit(audit_run, audit_by_id)  # tally + review-completeness -> status
     survivors.sort(key=_tier_key)
     return audit_run, audit_by_id, survivors, tail
-
-
-def _tally(meta, decision: str) -> None:
-    from app.constants import AuditDecision
-
-    if decision == AuditDecision.APPROVED:
-        meta.approved += 1
-    elif decision == AuditDecision.DOWNGRADE:
-        meta.downgraded += 1
-    elif decision == AuditDecision.INCORRECT:
-        meta.incorrect += 1
-    else:
-        meta.unknown += 1
 
 
 # ─────────────────────── helpers ───────────────────────
