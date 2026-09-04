@@ -273,6 +273,18 @@ def run_judge(
     }
     meta.judgeable_criteria_sent = sum(len(v) for v in unresolved_by_person.values())
 
+    # ── hardening PART 15 — spend budget/deadline-limited calls on candidates
+    #    NEAR THE QUALIFICATION BOUNDARY first: fewer remaining unresolved
+    #    required criteria (one verdict away from a decided outcome) and a
+    #    higher local match score are judged before a candidate that is still
+    #    ambiguous on everything. If a budget cap or the search deadline cuts
+    #    the run short, the highest-value candidates were already resolved. ──
+    bundle = sorted(
+        bundle,
+        key=lambda t: (len(unresolved_by_person.get(t[0].id, [])),
+                       -(local_scored[t[0].id].match_score if local_scored and t[0].id in local_scored else 0.0)),
+    )
+
     packets = build_packets(bundle, parsed, ctx, query=query, unresolved_by_person=unresolved_by_person)
     packets_by_id = {pkt["person_id"]: pkt for pkt in packets}
     meta.judge_candidate_count = len(packets)

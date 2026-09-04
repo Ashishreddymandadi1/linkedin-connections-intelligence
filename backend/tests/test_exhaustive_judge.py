@@ -9,7 +9,7 @@ locked-fact-contradicting verdicts.
 """
 from __future__ import annotations
 
-from app.constants import CriterionType, JudgeStatus, Modality, Operator, Scope, TriState
+from app.constants import CriterionType, JudgeStatus, Modality, Operator, Qualification, Scope, TriState
 from app.schemas import (
     CompactJudgeBatch,
     ParsedSearchQuery,
@@ -18,7 +18,7 @@ from app.schemas import (
 from app.services import semantic_judge
 from app.services.company_intel import company_key
 from app.services.judge_validator import validate_person
-from app.services.scoring import ProfileFacts, ScoringContext
+from app.services.scoring import ProfileFacts, ScoredCandidate, ScoringContext
 from tests.test_search import _Exp, _Person
 
 
@@ -210,6 +210,46 @@ def test_deadline_reached_stops_further_batches_and_marks_partial(monkeypatch):
     unjudged = [pid for pid, v in run.verdicts.items() if v["mentor_evidence"].get("judge_missing")]
     assert len(judged) == 30 and len(unjudged) == 70
     assert all(run.verdicts[pid]["mentor_evidence"]["status"] == TriState.UNKNOWN for pid in unjudged)
+
+
+def test_deadline_prioritises_candidates_nearest_the_qualification_boundary(monkeypatch):
+    """hardening PART 15 — when a run is cut short (budget or deadline),
+    candidates with fewer remaining unresolved required criteria (one verdict
+    from a decided outcome) and a higher local match score must be judged
+    BEFORE candidates still ambiguous on every dimension."""
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_batch_size", 5)
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge())
+
+    leadership = SearchCriterion(id="leadership", type=CriterionType.ROLE_FUNCTION,
+                                 concept="engineering leadership", scope=Scope.CAREER,
+                                 weight=40, required=True)
+    plan = _mentor_plan(extra_crits=[leadership])
+    bundle = _bundle(20)
+
+    local_scored = {}
+    for i, (p, _f, _x) in enumerate(bundle):
+        if i < 10:
+            local_scored[p.id] = ScoredCandidate(
+                person=p, match_score=90.0, components=[], evidence=[],
+                qualification=Qualification.POSSIBLE_MATCH,
+                status_by_criterion={"mentor_evidence": TriState.TRUE, "leadership": TriState.UNKNOWN},
+            )
+        else:
+            local_scored[p.id] = ScoredCandidate(
+                person=p, match_score=50.0, components=[], evidence=[],
+                qualification=Qualification.POSSIBLE_MATCH,
+                status_by_criterion={"mentor_evidence": TriState.UNKNOWN, "leadership": TriState.UNKNOWN},
+            )
+
+    run = semantic_judge.run_judge(
+        "x", plan, bundle, ScoringContext(),
+        network_size=20, pool_size=20, hard_rejected_count=0, local_scored=local_scored,
+        deadline=_FakeDeadline(2),  # only 2 of 4 batches (10 of 20 candidates) run
+    )
+    judged_ids = {pid for pid, v in run.verdicts.items() if not v["leadership"].get("judge_missing")}
+    near_ids = {p.id for i, (p, _f, _x) in enumerate(bundle) if i < 10}
+    assert judged_ids == near_ids
 
 
 def test_no_deadline_never_stops_a_run(monkeypatch):
