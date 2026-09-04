@@ -245,14 +245,18 @@ def test_oversized_single_packet_does_not_crash_and_stays_unknown(monkeypatch):
 
     seen = []
 
-    def fake_batch(payload, packets):
+    def fake_batch(payload, packets, unresolved_by_person=None):
         seen.extend(p["person_id"] for p in packets)
-        return ("ok", JudgeBatch(people=[JudgePersonVerdict(
-            person_id=p["person_id"], overall_fit="moderate",
-            criteria=[JudgeCriterionVerdict(criterion_id=c["id"], status="true", match_strength=0.7,
-                                            supporting_evidence_refs=["exp:e1"], experience_ids=["e1"])
-                      for c in payload["criteria_to_judge"]])
-            for p in packets]), "mock", "m1")
+        expanded = {
+            p["person_id"]: {
+                c["id"]: {"criterion_id": c["id"], "status": "true", "match_strength": 0.7,
+                         "confidence": 0.9, "reason": "", "supporting_evidence_refs": ["exp:e1"],
+                         "contradicting_evidence_refs": [], "experience_ids": ["e1"]}
+                for c in payload["criteria_to_judge"]
+            }
+            for p in packets
+        }
+        return ("ok", expanded, "mock", "m1")
 
     monkeypatch.setattr(semantic_judge, "_call_judge", fake_batch)
 

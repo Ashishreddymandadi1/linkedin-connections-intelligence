@@ -308,7 +308,7 @@ def run_judge(
             for person_id, crit_verdicts in leaf.payload.items():
                 verdicts[person_id] = crit_verdicts
 
-    _fill_missing(verdicts, unresolved_by_person, meta)
+    _fill_missing(verdicts, packets_by_id, jcrits, meta)
 
     if meta.judge_successful_batches == 0:
         meta.judge_status = JudgeStatus.UNAVAILABLE
@@ -435,13 +435,20 @@ def _call_judge(
 # ─────────────────────── completeness (§30) ───────────────────────
 
 
-def _fill_missing(verdicts: dict, unresolved_by_person: dict[str, list[str]], meta: JudgeMetadata) -> None:
-    """Fill UNKNOWN ONLY for criteria that were actually ASKED (a person's own
-    ``unresolved_criteria``) but never answered — a criterion the person was
-    never asked about (already resolved locally) is correctly absent from
-    ``verdicts`` and must NOT be flagged omitted (hardening PART 10)."""
+def _fill_missing(verdicts: dict, packets_by_id: dict, jcrits: list, meta: JudgeMetadata) -> None:
+    """Fill UNKNOWN ONLY for criteria that were actually ASKED for a packet
+    that was actually attempted (its own ``unresolved_criteria`` stamp, falling
+    back to every judgeable criterion for a packet without one — e.g. a test
+    double) — a criterion the person was never asked about (already resolved
+    locally) is correctly absent from ``verdicts`` and must NOT be flagged
+    omitted (hardening PART 10). Driven by ``packets_by_id`` (the packets that
+    actually survived oversized-packet filtering), not the pre-filter bundle."""
     judged = set(verdicts)
-    for pid, crit_ids in unresolved_by_person.items():
+    all_jcrit_ids = [c.id for c in jcrits]
+    for pid, pkt in packets_by_id.items():
+        crit_ids = pkt.get("unresolved_criteria")
+        if crit_ids is None:
+            crit_ids = all_jcrit_ids
         pcrit = verdicts.setdefault(pid, {})
         if pid not in judged and crit_ids:
             meta.omitted_people += 1
