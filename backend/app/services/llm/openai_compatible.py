@@ -13,6 +13,7 @@ from app.services.llm.base import (
     LLMConfigError,
     LLMOutputTruncated,
     LLMRateLimited,
+    LLMRequestTooLarge,
     LLMTransport,
     LLMUnavailable,
 )
@@ -78,6 +79,10 @@ def chat_json(
         raise LLMUnavailable(f"provider {resp.status_code}")
     if resp.status_code in (401, 403):
         raise LLMAuthError(f"provider auth {resp.status_code}")
+    if resp.status_code == 413:
+        # request-specific (this payload was too large), NOT a provider-health
+        # signal — must never cool this provider down (hardening PART 6).
+        raise LLMRequestTooLarge(f"provider {resp.status_code}: request too large")
     if resp.status_code == 404:
         raise LLMConfigError("model not found / unavailable (404)")
     if resp.status_code == 400 and "json_validate_failed" in resp.text:

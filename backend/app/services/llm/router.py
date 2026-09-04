@@ -25,6 +25,7 @@ from app.services.llm.base import (
     LLMOutputTruncated,
     LLMProvider,
     LLMRateLimited,
+    LLMRequestTooLarge,
     LLMUnavailable,
 )
 from app.services.llm.providers import default_chain
@@ -100,14 +101,19 @@ def generate_structured(
                 if attempt < retries:
                     _sleep(2 ** attempt)
                     continue
-            except LLMOutputTruncated as e:
-                # retrying the IDENTICAL request would just truncate again — go
-                # straight to the next provider; the caller (a batched judge/
-                # audit) is the one that can actually fix this, by splitting.
-                last_category = e.category
-                log.warning("%s -> %s output_truncated: %s (no identical retry — caller should split)",
-                           operation, provider.name, str(e)[:160])
-                break
+            except (LLMOutputTruncated, LLMRequestTooLarge) as e:
+                # the problem is the request/expected-response SIZE, not this
+                # provider — trying Groq/OpenRouter with the IDENTICAL oversized
+                # payload would just fail the same way (413 / another truncation)
+                # and waste a round trip. Return to the caller IMMEDIATELY so the
+                # adaptive splitter can shrink the request; the smaller request
+                # then goes through the full provider chain from the top.
+                attempts.append({"provider": provider.name, "status": e.category})
+                log.warning("%s -> %s %s: %s (returning to caller — no same-size fallback)",
+                           operation, provider.name, e.category, str(e)[:160])
+                meta = {"operation": operation, "selected_provider": None,
+                       "selected_model": None, "attempts": attempts}
+                return (None, meta) if return_meta else None
             except (LLMBadOutput, ValidationError) as e:
                 last_category = "bad_output"
                 log.warning("%s -> %s bad_output: %s (try %d)", operation, provider.name, str(e)[:160], attempt + 1)
@@ -131,11 +137,11 @@ def generate_structured(
                 return model, provider.name, provider.model
             break  # retries for this provider exhausted -> next provider
 
-        # provider gave up — record for the breaker (bad_output / output_truncated
-        # are prompt- or request-size-local, not a provider fault, so neither
-        # trips the circuit)
+        # provider gave up — record for the breaker. bad_output is prompt-local,
+        # not a provider fault, so it does not trip the circuit. (truncated /
+        # request_too_large never reach here — they return immediately above.)
         attempts.append({"provider": provider.name, "status": last_category})
-        if last_category not in ("bad_output", "output_truncated"):
+        if last_category != "bad_output":
             circuit.record_failure(provider.name, last_category)
 
     log.error("%s -> all LLM providers exhausted (%s)", operation, [a["status"] for a in attempts])

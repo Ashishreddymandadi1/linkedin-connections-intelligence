@@ -11,9 +11,7 @@ from __future__ import annotations
 
 from app.constants import CriterionType, JudgeStatus, Modality, Operator, Scope, TriState
 from app.schemas import (
-    JudgeBatch,
-    JudgeCriterionVerdict,
-    JudgePersonVerdict,
+    CompactJudgeBatch,
     ParsedSearchQuery,
     SearchCriterion,
 )
@@ -68,37 +66,39 @@ def _fake_judge(*, true_ids=None, none_after=None, omit_people=(), omit_criteria
     as the pre-adaptive-splitting behaviour)."""
     state = {"batch": 0}
 
-    def fake(payload, packets):
+    def fake(payload, packets, unresolved_by_person=None):
         idx = state["batch"]
         state["batch"] += 1
         if capture is not None:
             capture.append({"payload": payload, "packets": packets})
         if none_after is not None and idx >= none_after:
             return "failed", None, None, None
-        people = []
+        expanded: dict[str, dict[str, dict]] = {}
         for pkt in packets:
             pid = pkt["person_id"]
             if pid in omit_people:
                 continue
-            crit_ids = [c["id"] for c in payload["criteria_to_judge"]]
+            crit_ids = (unresolved_by_person or {}).get(pid) or [c["id"] for c in payload["criteria_to_judge"]]
             want_true = true_ids if true_ids is not None else crit_ids
-            verdicts = []
+            per_person: dict[str, dict] = {}
             for cid in crit_ids:
                 if omit_criteria and (pid, cid) in omit_criteria:
                     continue
                 first_exp = (pkt.get("current") or {}).get("experience_id") \
                     or (pkt["past"][0]["experience_id"] if pkt.get("past") else None)
-                verdicts.append(JudgeCriterionVerdict(
-                    criterion_id=cid,
-                    status="true" if cid in want_true else "unknown",
-                    match_strength=0.9 if cid in want_true else 0.0,
-                    confidence=0.9,
-                    reason="clear evidence in the role description",
-                    supporting_evidence_refs=[f"exp:{first_exp}"] if first_exp else [],
-                    experience_ids=[first_exp] if first_exp else [],
-                ))
-            people.append(JudgePersonVerdict(person_id=pid, criteria=verdicts, overall_fit="strong"))
-        return "ok", JudgeBatch(people=people), "mock:provider", "mock-model-1"
+                is_true = cid in want_true
+                per_person[cid] = {
+                    "criterion_id": cid,
+                    "status": "true" if is_true else "unknown",
+                    "match_strength": 0.9 if is_true else 0.0,
+                    "confidence": 0.9,
+                    "reason": "clear evidence in the role description",
+                    "supporting_evidence_refs": [f"exp:{first_exp}"] if (first_exp and is_true) else [],
+                    "contradicting_evidence_refs": [],
+                    "experience_ids": [first_exp] if (first_exp and is_true) else [],
+                }
+            expanded[pid] = per_person
+        return "ok", expanded, "mock:provider", "mock-model-1"
 
     return fake
 
@@ -213,7 +213,7 @@ def test_judge_batch_uses_the_router(monkeypatch):
         seen["operation"] = kw.get("operation")
         meta = {"operation": kw.get("operation"), "selected_provider": "anthropic:paid",
                "selected_model": "claude-haiku-4-5", "attempts": [{"provider": "anthropic:paid", "status": "success"}]}
-        return JudgeBatch(people=[]), "anthropic:paid", "claude-haiku-4-5", meta
+        return CompactJudgeBatch(people=[]), "anthropic:paid", "claude-haiku-4-5", meta
 
     monkeypatch.setattr(semantic_judge, "generate_structured", fake_generate)
     outcome, payload, provider, model = semantic_judge._call_judge({"criteria_to_judge": []}, [{"person_id": "p0"}])
@@ -403,21 +403,23 @@ def test_no_judgeable_criteria_is_not_used(monkeypatch):
 # ─────────────────────── §22/§47/§48/§59 — end-to-end through /search ───────────────────────
 
 
-def _all_true_batch(payload, packets):
-    people = []
+def _all_true_batch(payload, packets, unresolved_by_person=None):
+    expanded: dict[str, dict[str, dict]] = {}
     for pkt in packets:
+        pid = pkt["person_id"]
         first_exp = (pkt.get("current") or {}).get("experience_id") \
             or (pkt["past"][0]["experience_id"] if pkt.get("past") else None)
-        people.append(JudgePersonVerdict(
-            person_id=pkt["person_id"], overall_fit="strong",
-            criteria=[JudgeCriterionVerdict(
-                criterion_id=c["id"], status="true", match_strength=0.9, confidence=0.9,
-                reason="the role descriptions show mentoring and leadership",
-                supporting_evidence_refs=[f"exp:{first_exp}"] if first_exp else [],
-                experience_ids=[first_exp] if first_exp else [],
-            ) for c in payload["criteria_to_judge"]],
-        ))
-    return "ok", JudgeBatch(people=people), "mock:provider", "mock-model-1"
+        crit_ids = (unresolved_by_person or {}).get(pid) or [c["id"] for c in payload["criteria_to_judge"]]
+        expanded[pid] = {
+            cid: {
+                "criterion_id": cid, "status": "true", "match_strength": 0.9, "confidence": 0.9,
+                "reason": "role shows mentoring and leadership",
+                "supporting_evidence_refs": [f"exp:{first_exp}"] if first_exp else [],
+                "contradicting_evidence_refs": [], "experience_ids": [first_exp] if first_exp else [],
+            }
+            for cid in crit_ids
+        }
+    return "ok", expanded, "mock:provider", "mock-model-1"
 
 
 def test_search_judges_every_viable_candidate_and_min_score_does_not_prefilter(client, monkeypatch):
@@ -430,7 +432,9 @@ def test_search_judges_every_viable_candidate_and_min_score_does_not_prefilter(c
 
     seen = []
     monkeypatch.setattr(semantic_judge, "_call_judge",
-                        lambda payload, packets: (seen.append(len(packets)), _all_true_batch(payload, packets))[1])
+                        lambda payload, packets, unresolved_by_person=None: (
+                            seen.append(len(packets)),
+                            _all_true_batch(payload, packets, unresolved_by_person))[1])
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_max_candidates", 0)
 

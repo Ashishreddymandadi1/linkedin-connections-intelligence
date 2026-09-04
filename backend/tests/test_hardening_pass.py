@@ -314,9 +314,9 @@ def test_broad_query_does_not_judge_everyone_when_most_are_decided(monkeypatch):
 
     seen_batches = []
 
-    def fake_call_judge(payload, packets):
+    def fake_call_judge(payload, packets, unresolved_by_person=None):
         seen_batches.append(len(packets))
-        return "ok", type("JB", (), {"people": []})(), "mock", "m1"
+        return "ok", {}, "mock", "m1"
 
     monkeypatch.setattr(semantic_judge, "_call_judge", fake_call_judge)
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
@@ -488,9 +488,9 @@ def test_offline_1000_profile_benchmark_does_not_explode_judge_calls(monkeypatch
 
     judge_requests = {"n": 0}
 
-    def fake_call_judge(payload, packets):
+    def fake_call_judge(payload, packets, unresolved_by_person=None):
         judge_requests["n"] += 1
-        return "ok", type("JB", (), {"people": []})(), "mock", "m1"
+        return "ok", {}, "mock", "m1"
 
     monkeypatch.setattr(semantic_judge, "_call_judge", fake_call_judge)
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")

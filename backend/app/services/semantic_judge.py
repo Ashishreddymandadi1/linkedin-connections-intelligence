@@ -40,10 +40,11 @@ from app.constants import (
     Qualification,
     TriState,
 )
-from app.schemas import JudgeBatch, ParsedSearchQuery
+from app.schemas import CompactJudgeBatch, ParsedSearchQuery
 from app.services.judge_packet import build_packets, plan_payload
 from app.services.llm.adaptive_batch import run_adaptive
 from app.services.llm.router import generate_structured
+from app.services.llm.token_estimate import estimate_judge_output_tokens, plan_batch_size
 
 log = logging.getLogger("app.judge")
 
@@ -58,13 +59,13 @@ _SYSTEM = (
     "\"unknown\". A weak or indirect implication is also \"unknown\", not \"true\". Use "
     "\"false\" only when the evidence CLEARLY contradicts the criterion.\n\n"
     "Ground every verdict: put the packet references that support it in "
-    "supporting_evidence_refs — valid ref forms are \"exp:<id>\", \"edu:<id>\", \"cert:<id>\", "
+    "supporting_refs — valid ref forms are \"exp:<id>\", \"edu:<id>\", \"cert:<id>\", "
     "\"skill:<name>\", \"assertion:<n>\", \"company:<key>\", \"pub:<id>\" (a publication), "
     "\"vol:<id>\" (a volunteering role), \"rec:<id>\" (a recommendation received). Put anything "
-    "that argues AGAINST the criterion in contradicting_evidence_refs, and the relevant "
-    "experience ids in experience_ids. A \"true\" verdict with no supporting reference is "
-    "rejected. A \"false\" verdict needs a contradicting reference OR an explicit statement that "
-    "the full history was reviewed and clearly lacks it — otherwise return \"unknown\".\n\n"
+    "that argues AGAINST the criterion in contradicting_refs. A \"true\" verdict with no "
+    "supporting reference is rejected. A \"false\" verdict needs a contradicting reference OR an "
+    "explicit statement that the full history was reviewed and clearly lacks it — otherwise "
+    "return \"unknown\".\n\n"
     "SCOPE MATTERS. If a criterion is scoped 'current', it can only be true from a role marked "
     "is_current=true. 'past' needs a non-current role.\n\n"
     "COMMON FALSE POSITIVES — do NOT mark true for these:\n"
@@ -81,9 +82,15 @@ _SYSTEM = (
     "must hold; with ANY_OF, one is enough; with NOT, the value must be ABSENT.\n"
     "MODALITY: a criterion with modality 'possible' is a soft signal — 'true' if the evidence "
     "supports it, but its absence must never count against the person.\n\n"
-    "Also give each person an overall_fit (strong / moderate / weak / not_fit) and a one-line "
-    "overall_reason — informational only; it does not override individual criteria.\n"
-    "Return JSON only."
+    "Each person object lists an \"unresolved_criteria\" array — those are the ONLY criterion_ids "
+    "you must return a verdict for. The rest of that person's criteria were already decided from "
+    "stored facts; do not re-judge them and do not invent extra criteria.\n\n"
+    "OUTPUT IS TRANSPORT ONLY, not a report: no prose paragraphs, no per-person summary, no "
+    "overall fit. A one-word-scale 'reason' of a few words is enough ONLY if it clarifies a "
+    "borderline call — omit it otherwise. Return JSON only, in exactly this shape: "
+    '{"people":[{"person_id":"...","criteria":[{"criterion_id":"...","status":"true|false|unknown",'
+    '"confidence":0-1,"supporting_refs":["exp:.."],"contradicting_refs":[],"reason":""}]}]} '
+    "— one entry per person_id, one verdict per criterion_id in that person's unresolved_criteria."
 )
 
 
@@ -117,6 +124,10 @@ class JudgeMetadata:
     #: semantics before any query-time LLM call was even considered.
     candidates_decided_locally: int = 0
     candidates_needing_llm: int = 0
+    #: hardening PART 10 — total (person, criterion) verdicts actually asked
+    #: for, vs judge_candidate_count * len(judgeable_criteria) which is what
+    #: would have been sent before per-criterion filtering.
+    judgeable_criteria_sent: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -143,6 +154,7 @@ class JudgeMetadata:
             "adaptive_splits": self.adaptive_splits,
             "candidates_decided_locally": self.candidates_decided_locally,
             "candidates_needing_llm": self.candidates_needing_llm,
+            "judgeable_criteria_sent": self.judgeable_criteria_sent,
         }
 
 
@@ -246,14 +258,30 @@ def run_judge(
         meta.cap_limit = cap
         bundle = _cap_prioritise(bundle, local_scored)[:cap]
 
-    packets = build_packets(bundle, parsed, ctx, query=query)
+    # ── PART 10 — PER-CRITERION unresolved list, not "all jcrits for everyone".
+    #    A person with 3/4 criteria already TRUE/FALSE locally is only asked
+    #    about the 1 that's still unknown — this is what actually shrinks the
+    #    output, on top of who even reaches the judge. ──────────────────────
+    unresolved_by_person: dict[str, list[str]] = {
+        p.id: [c.id for c in jcrits if needs_semantic_judge(local_scored.get(p.id) if local_scored else None, c)]
+        for p, _f, _x in bundle
+    }
+    meta.judgeable_criteria_sent = sum(len(v) for v in unresolved_by_person.values())
+
+    packets = build_packets(bundle, parsed, ctx, query=query, unresolved_by_person=unresolved_by_person)
     packets_by_id = {pkt["person_id"]: pkt for pkt in packets}
     meta.judge_candidate_count = len(packets)
 
     payload = plan_payload(query, parsed, jcrits)
+
+    # ── PART 4 — proactively size batches from criteria DENSITY instead of
+    #    discovering "too big" only after a truncation. ─────────────────────
+    counts = [len(unresolved_by_person.get(pkt["person_id"], [])) or 1 for pkt in packets]
+    avg_criteria = (sum(counts) / len(counts)) if counts else 1.0
+    planned_size = plan_batch_size(settings.semantic_judge_batch_size, avg_criteria)
     batches, oversized = _make_batches(
         packets,
-        size=settings.semantic_judge_batch_size,
+        size=planned_size,
         max_chars=settings.semantic_judge_max_batch_chars,
     )
     meta.oversized_packets = len(oversized)
@@ -263,7 +291,7 @@ def run_judge(
 
     verdicts: dict[str, dict[str, dict]] = {}
     for batch in batches:
-        leaves, stats = run_adaptive(batch, lambda pkts: _call_judge(payload, pkts))
+        leaves, stats = run_adaptive(batch, lambda pkts: _call_judge(payload, pkts, unresolved_by_person))
         meta.judge_batch_count += stats.batches_attempted
         meta.judge_successful_batches += stats.successful_batches
         meta.judge_failed_batches += stats.failed_batches
@@ -277,14 +305,10 @@ def run_judge(
         for leaf in leaves:
             if leaf.outcome != "ok":
                 continue
-            jb = leaf.payload
-            for pv in jb.people:
-                verdicts[pv.person_id] = {
-                    cv.criterion_id: {**cv.model_dump(), "overall_fit": pv.overall_fit}
-                    for cv in pv.criteria
-                }
+            for person_id, crit_verdicts in leaf.payload.items():
+                verdicts[person_id] = crit_verdicts
 
-    _fill_missing(verdicts, packets_by_id, jcrits, meta)
+    _fill_missing(verdicts, unresolved_by_person, meta)
 
     if meta.judge_successful_batches == 0:
         meta.judge_status = JudgeStatus.UNAVAILABLE
@@ -294,9 +318,11 @@ def run_judge(
         meta.judge_status = JudgeStatus.FULL
 
     log.info(
-        "judge %s: %d viable, %d judged, %d/%d batches ok, status=%s",
-        mode, meta.viable_candidate_count, meta.judge_candidate_count,
-        meta.judge_successful_batches, meta.judge_batch_count, meta.judge_status,
+        "judge %s: hard_gate_viable=%d locally_resolved=%d judge_candidates=%d "
+        "unresolved_criteria=%d batches=%d/%d ok truncations=%d splits=%d status=%s",
+        mode, total_before_local, meta.candidates_decided_locally, meta.judge_candidate_count,
+        meta.judgeable_criteria_sent, meta.judge_successful_batches, meta.judge_batch_count,
+        meta.truncations, meta.adaptive_splits, meta.judge_status,
     )
     return JudgeRun(verdicts, packets_by_id, meta)
 
@@ -338,34 +364,70 @@ def _make_batches(
     return batches, oversized
 
 
-def _call_judge(payload: dict, packets: list[dict]) -> tuple[str, object, str | None, str | None]:
+def _expand_compact(cv, valid_ids: set[str]) -> dict:
+    """Compact verdict -> the existing internal shape every downstream
+    validator/scorer already expects (hardening PART 1). ``match_strength``
+    is DERIVED — never asked of the model: TRUE -> confidence, FALSE -> 0,
+    UNKNOWN -> 0. ``experience_ids`` derived from ``exp:`` refs."""
+    status = cv.status if cv.status in ("true", "false") else TriState.UNKNOWN
+    strength = cv.confidence if status == TriState.TRUE else 0.0
+    sup = [r for r in cv.supporting_refs if r in valid_ids] if valid_ids else cv.supporting_refs
+    con = [r for r in cv.contradicting_refs if r in valid_ids] if valid_ids else cv.contradicting_refs
+    exp_ids = [r.split("exp:", 1)[1] for r in sup if r.startswith("exp:")]
+    return {
+        "criterion_id": cv.criterion_id, "status": status,
+        "match_strength": round(float(strength), 3), "confidence": cv.confidence,
+        "reason": cv.reason, "supporting_evidence_refs": sup, "contradicting_evidence_refs": con,
+        "experience_ids": exp_ids,
+    }
+
+
+def _call_judge(
+    payload: dict, packets: list[dict], unresolved_by_person: dict[str, list[str]] | None = None,
+    *, _retry: bool = False,
+) -> tuple[str, object, str | None, str | None]:
     """One batched judge request through the router — the ``CallFn`` the
-    adaptive splitter drives. Returns ``("ok", JudgeBatch, provider, model)``,
-    ``("truncated", None, None, None)`` (caller should split and retry the
-    halves), or ``("failed", None, None, None)`` (every provider genuinely
-    exhausted / non-truncation error)."""
+    adaptive splitter drives. Returns ``("ok", {person_id: {criterion_id:
+    verdict_dict}}, provider, model)``, ``("truncated", None, None, None)``
+    (caller should split and retry the halves), or ``("failed", None, None,
+    None)`` (every provider genuinely exhausted / non-truncation error)."""
+    counts = [len(pkt.get("unresolved_criteria") or []) or 1 for pkt in packets]
+    max_tokens = estimate_judge_output_tokens(len(packets), counts)
+    if _retry:
+        from app.services.llm.token_estimate import MAX_OUTPUT_TOKENS
+        max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
+
     user = (
         "SEARCH PLAN (how to judge — never a phrase to match):\n"
         + json.dumps(payload, ensure_ascii=False, default=str)
-        + "\n\nPEOPLE (one evidence packet each):\n"
+        + "\n\nPEOPLE (one evidence packet each — judge ONLY each person's own unresolved_criteria):\n"
         + json.dumps(packets, ensure_ascii=False, default=str)
-        + '\n\nReturn {"people":[{"person_id":"...","overall_fit":"strong|moderate|weak|not_fit",'
-        '"overall_reason":"...","criteria":[{"criterion_id":"...","status":"true|false|unknown",'
-        '"match_strength":0-1,"confidence":0-1,"reason":"...","supporting_evidence_refs":["exp:.."],'
-        '"contradicting_evidence_refs":[],"experience_ids":[]}]}]} — one entry per person_id, '
-        "one verdict per listed criterion.id."
     )
     result = generate_structured(
-        _SYSTEM, user, JudgeBatch,
-        max_tokens=min(4000, 400 + 320 * len(packets)),
-        operation="semantic_judge",
-        return_meta=True,
+        _SYSTEM, user, CompactJudgeBatch,
+        max_tokens=max_tokens, operation="semantic_judge", return_meta=True,
     )
     if result[0] is not None:
-        model, provider, model_id, meta = result
-        return "ok", model, provider, model_id
+        batch, provider, model_id, _meta = result
+        expanded: dict[str, dict[str, dict]] = {}
+        for pv in batch.people:
+            allowed = set((unresolved_by_person or {}).get(pv.person_id, [])) or None
+            expanded[pv.person_id] = {
+                cv.criterion_id: _expand_compact(cv, set())
+                for cv in pv.criteria
+                if allowed is None or cv.criterion_id in allowed  # never accept an unasked criterion
+            }
+        return "ok", expanded, provider, model_id
+
     _, meta = result
-    if any(a.get("status") == "output_truncated" for a in meta.get("attempts", [])):
+    truncated = any(a.get("status") in ("output_truncated", "request_too_large")
+                    for a in meta.get("attempts", []))
+    if truncated and len(packets) == 1 and not _retry:
+        # PART 7 — last line of defense: a single person still truncating at
+        # the estimated budget gets ONE retry with double the room before
+        # giving up (nothing left to split). Bounded — never a second retry.
+        return _call_judge(payload, packets, unresolved_by_person, _retry=True)
+    if truncated:
         return "truncated", None, None, None
     return "failed", None, None, None
 
@@ -373,18 +435,22 @@ def _call_judge(payload: dict, packets: list[dict]) -> tuple[str, object, str | 
 # ─────────────────────── completeness (§30) ───────────────────────
 
 
-def _fill_missing(verdicts: dict, packets_by_id: dict, jcrits: list, meta: JudgeMetadata) -> None:
+def _fill_missing(verdicts: dict, unresolved_by_person: dict[str, list[str]], meta: JudgeMetadata) -> None:
+    """Fill UNKNOWN ONLY for criteria that were actually ASKED (a person's own
+    ``unresolved_criteria``) but never answered — a criterion the person was
+    never asked about (already resolved locally) is correctly absent from
+    ``verdicts`` and must NOT be flagged omitted (hardening PART 10)."""
     judged = set(verdicts)
-    for pid in packets_by_id:
+    for pid, crit_ids in unresolved_by_person.items():
         pcrit = verdicts.setdefault(pid, {})
-        if pid not in judged:
+        if pid not in judged and crit_ids:
             meta.omitted_people += 1
-        for c in jcrits:
-            if c.id not in pcrit:
+        for cid in crit_ids:
+            if cid not in pcrit:
                 if pid in judged:
                     meta.omitted_criteria += 1
-                pcrit[c.id] = {
-                    "criterion_id": c.id, "status": TriState.UNKNOWN,
+                pcrit[cid] = {
+                    "criterion_id": cid, "status": TriState.UNKNOWN,
                     "match_strength": 0.0, "confidence": 0.0, "reason": "",
                     "supporting_evidence_refs": [], "contradicting_evidence_refs": [],
                     "experience_ids": [], "judge_missing": True,

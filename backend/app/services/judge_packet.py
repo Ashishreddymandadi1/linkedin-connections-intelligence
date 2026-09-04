@@ -68,20 +68,28 @@ def _ref(prefix: str, row, idx: int) -> str:
 def build_packets(
     bundle: list[tuple], parsed: ParsedSearchQuery, ctx: ScoringContext, *, query: str,
     max_packet_chars: int | None = None,
+    unresolved_by_person: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     """``bundle``: ``[(person, ProfileFacts, {"volunteering": [...], "recommendations": [...]})]``.
     Returns one packet dict per candidate (same order). ``max_packet_chars``
     overrides ``settings.semantic_judge_max_packet_chars`` (the final auditor
-    uses its own budget, V4 PART 5 §4/§40)."""
+    uses its own budget, V4 PART 5 §4/§40). ``unresolved_by_person`` — when
+    given, stamps each packet with ONLY the criterion ids that person still
+    needs judged (hardening PART 10) — everything else on their profile was
+    already resolved from stored facts/semantics and must not be re-asked."""
     toks = priority_tokens(query, parsed)
     want_mentor_context = bool(toks & _MENTOR_TOKENS) or parsed.intent == "mentor_recommendation"
     want_academia_context = bool(toks & _ACADEMIA_TOKENS)
-    return [
+    packets = [
         _one_packet(person, facts, extras, ctx, toks,
                     want_mentor_context=want_mentor_context, want_academia_context=want_academia_context,
                     max_packet_chars=max_packet_chars)
         for person, facts, extras in bundle
     ]
+    if unresolved_by_person is not None:
+        for pkt in packets:
+            pkt["unresolved_criteria"] = unresolved_by_person.get(pkt["person_id"], [])
+    return packets
 
 
 def packet_refs(packet: dict) -> set[str]:

@@ -16,6 +16,7 @@ from app.services.llm.base import (
     LLMConfigError,
     LLMOutputTruncated,
     LLMRateLimited,
+    LLMRequestTooLarge,
     LLMTransport,
     LLMUnavailable,
 )
@@ -70,6 +71,8 @@ def messages_json(
         raise LLMUnavailable(f"anthropic {resp.status_code}")
     if resp.status_code in (401, 403):
         raise LLMAuthError(f"anthropic auth {resp.status_code}")
+    if resp.status_code == 413:
+        raise LLMRequestTooLarge(f"anthropic {resp.status_code}: request too large")
     if resp.status_code == 400 and "workspace" in resp.text.lower():
         # identity-linked key without / with a wrong ANTHROPIC_WORKSPACE_ID (V4 §7)
         raise LLMConfigError("anthropic workspace configuration error")

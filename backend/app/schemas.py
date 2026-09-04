@@ -494,6 +494,139 @@ class JudgeBatch(BaseModel):
         return out
 
 
+# ─────────────────── compact LLM TRANSPORT schemas (hardening PART 1/2) ───────────────────
+#
+# The judge/audit's ONLY job at query time is "does this criterion hold, with
+# grounded evidence" — not user-facing prose. These are what the model
+# actually returns; the backend expands them into the existing internal
+# JudgeCriterionVerdict / FinalAuditCriterionReview shape (match_strength
+# derived from status+confidence, experience_ids derived from exp: refs) so
+# every downstream validator/scorer is unchanged.
+
+
+class CompactCriterionVerdict(BaseModel):
+    criterion_id: str
+    status: str = "unknown"
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    supporting_refs: list[str] = []
+    contradicting_refs: list[str] = []
+    #: short ONLY — kept because judge_validator's mentor/passive-mentee check
+    #: reads verdict text; NOT a user-facing explanation.
+    reason: str = Field(default="", max_length=100)
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _norm_status(cls, v):
+        v = str(v or "").strip().lower()
+        return v if v in ("true", "false", "unknown") else "unknown"
+
+    _norm_refs = field_validator(
+        "supporting_refs", "contradicting_refs", mode="before",
+    )(staticmethod(_coerce_str_list))
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp01(cls, v):
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _short(cls, v):
+        return (str(v or ""))[:100]
+
+
+class CompactPersonVerdict(BaseModel):
+    person_id: str
+    criteria: list[CompactCriterionVerdict] = []
+
+    @field_validator("criteria", mode="before")
+    @classmethod
+    def _drop_bad_criteria(cls, v):
+        if not v:
+            return []
+        return [c for c in (v if isinstance(v, list) else [v])
+                if not isinstance(c, dict) or c.get("criterion_id")]
+
+
+class CompactJudgeBatch(BaseModel):
+    people: list[CompactPersonVerdict] = []
+
+    @field_validator("people", mode="before")
+    @classmethod
+    def _drop_bad_people(cls, v):
+        if not v:
+            return []
+        return [p for p in (v if isinstance(v, list) else [v])
+                if not isinstance(p, dict) or p.get("person_id")]
+
+
+class CompactAuditCriterionReview(BaseModel):
+    criterion_id: str
+    status_review: str = "uncertain"
+    supporting_refs: list[str] = []
+    contradicting_refs: list[str] = []
+    reason: str = Field(default="", max_length=100)
+
+    @field_validator("status_review", mode="before")
+    @classmethod
+    def _norm_review(cls, v):
+        v = str(v or "").strip().lower().replace(" ", "_")
+        return v if v in ("supported", "unsupported", "uncertain") else "uncertain"
+
+    _norm_refs = field_validator(
+        "supporting_refs", "contradicting_refs", mode="before",
+    )(staticmethod(_coerce_str_list))
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _short(cls, v):
+        return (str(v or ""))[:100]
+
+
+class CompactAuditPersonDecision(BaseModel):
+    person_id: str
+    decision: str = "unknown"
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    criteria: list[CompactAuditCriterionReview] = []
+
+    @field_validator("decision", mode="before")
+    @classmethod
+    def _norm_decision(cls, v):
+        v = str(v or "").strip().lower().replace(" ", "_")
+        return v if v in ("approved", "downgrade", "incorrect", "unknown") else "unknown"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp01(cls, v):
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    @field_validator("criteria", mode="before")
+    @classmethod
+    def _drop_bad(cls, v):
+        if not v:
+            return []
+        return [c for c in (v if isinstance(v, list) else [v])
+                if not isinstance(c, dict) or c.get("criterion_id")]
+
+
+class CompactAuditBatch(BaseModel):
+    people: list[CompactAuditPersonDecision] = []
+
+    @field_validator("people", mode="before")
+    @classmethod
+    def _drop_bad_people(cls, v):
+        if not v:
+            return []
+        return [p for p in (v if isinstance(v, list) else [v])
+                if not isinstance(p, dict) or p.get("person_id")]
+
+
 # ─────────────────── validated LLM output: query ───────────────────
 
 
