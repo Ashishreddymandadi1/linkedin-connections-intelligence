@@ -118,5 +118,10 @@ class LLMProvider(abc.ABC):
         """True if this provider is configured (has a key)."""
 
     @abc.abstractmethod
-    def generate_json(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500) -> dict:
-        """Return parsed JSON dict. Raise an ``LLMError`` subclass on failure."""
+    def generate_json(
+        self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500, timeout: float | None = None,
+    ) -> dict:
+        """Return parsed JSON dict. Raise an ``LLMError`` subclass on failure.
+        ``timeout`` (hardening PART 17) overrides the provider's default HTTP
+        timeout — used to keep query interpretation from holding a search
+        indefinitely on a slow-but-not-failing provider."""

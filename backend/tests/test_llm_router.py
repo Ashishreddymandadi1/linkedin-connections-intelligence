@@ -54,7 +54,7 @@ class FakeProvider(LLMProvider):
     def available(self) -> bool:
         return True
 
-    def generate_json(self, system_prompt, user_prompt, *, max_tokens=1500):  # noqa: ARG002
+    def generate_json(self, system_prompt, user_prompt, *, max_tokens=1500, timeout=None):  # noqa: ARG002
         self.calls += 1
         b = self.behavior
         if b == "ok":

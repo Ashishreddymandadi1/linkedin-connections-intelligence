@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     top_connections: int = 20
     min_match_score: float = 12.0          # drop incidental / weak matches (spec §38)
     llm_query_interpretation: bool = True  # False -> deterministic query parser only
+    #: hardening PART 17 — query interpretation is foundational (never metered
+    #: by SEARCH_LLM_MAX_CALLS) so it must not be allowed to hold a search
+    #: hostage on a slow-but-not-failing provider; a bounded timeout falls
+    #: through to the next provider (then the deterministic parser) quickly.
+    query_interpretation_timeout_seconds: float = 20.0
     llm_reason_generation: bool = True     # False -> deterministic reason templates
     llm_reason_top_n: int = 8              # LLM reasons for the top N; template for the rest
     #: hardening PART 6 — soft cap on LLM calls AFTER query interpretation (judge

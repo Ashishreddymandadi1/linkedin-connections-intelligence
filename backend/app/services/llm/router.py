@@ -51,12 +51,16 @@ def generate_structured(
     chain: list[LLMProvider] | None = None,
     operation: str = "unspecified",
     return_meta: bool = False,
+    timeout: float | None = None,
 ):
     """Return ``(validated_model, provider_name, model_id)``  — or, when
     ``return_meta=True``, ``(model, provider_name, model_id, meta)`` where meta
     is ``{"operation","selected_provider","selected_model","attempts":[...]}``
     (V4 §11). Returns ``None`` (or ``(None, meta)``) when every provider is
-    exhausted."""
+    exhausted. ``timeout`` (hardening PART 17) overrides each provider's
+    default HTTP timeout for this call — used by query interpretation so one
+    slow-but-not-failing provider can't hold a whole search hostage; every
+    other caller leaves it ``None`` (provider default)."""
     if not budget.try_consume():
         log.warning("%s -> SEARCH_LLM_MAX_CALLS budget exhausted — skipping (deterministic result stands)",
                    operation)
@@ -81,7 +85,7 @@ def generate_structured(
         last_category = "error"
         for attempt in range(retries + 1):
             try:
-                raw = provider.generate_json(system_prompt, full_user, max_tokens=max_tokens)
+                raw = provider.generate_json(system_prompt, full_user, max_tokens=max_tokens, timeout=timeout)
                 model = schema.model_validate(raw)
             except LLMRateLimited as e:
                 last_category = e.category

@@ -201,6 +201,7 @@ def interpret_query(query: str) -> tuple[ParsedSearchQuery, str, str | None]:
             ParsedSearchQuery,
             max_tokens=1200,
             operation="query_interpretation",
+            timeout=settings.query_interpretation_timeout_seconds,
         )
         if result is not None:
             parsed, provider, model = result

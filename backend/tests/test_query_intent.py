@@ -385,3 +385,26 @@ def test_unseen_faculty_query_keeps_education_out():
     plan = _plan("tenure-track faculty in computational biology")
     assert CriterionType.EDUCATION not in _types(plan)
     assert any("faculty" in (c.concept or "").lower() and c.required for c in plan.criteria)
+
+
+# ─────────────────── hardening PART 17 — bounded interpretation timeout ───────────────────
+
+
+def test_llm_interpretation_uses_the_configured_timeout(monkeypatch):
+    """Query interpretation is foundational (never metered by SEARCH_LLM_MAX_CALLS)
+    so it must not be able to hold a search hostage on a slow provider — it must
+    pass a bounded timeout into the router, distinct from every other LLM call
+    (judge/audit/reason), which leave it at the provider default."""
+    monkeypatch.setattr(settings, "llm_query_interpretation", True)
+    monkeypatch.setattr(settings, "query_interpretation_timeout_seconds", 12.5)
+    captured = {}
+
+    def _fake_generate_structured(system, user, schema, **kw):
+        captured.update(kw)
+        return None  # falls through to the deterministic parser
+
+    monkeypatch.setattr("app.services.query_interpreter.generate_structured", _fake_generate_structured)
+    parsed, provider, _model = interpret_query("cybersecurity AND healthcare backgrounds")
+    assert captured.get("timeout") == 12.5
+    assert provider == "deterministic"  # fallback still produced a real plan
+    assert parsed.criteria

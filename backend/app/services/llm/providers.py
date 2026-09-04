@@ -26,7 +26,9 @@ class GroqProvider(LLMProvider):
     def available(self) -> bool:
         return bool(settings.groq_api_key)
 
-    def generate_json(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500) -> dict:
+    def generate_json(
+        self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500, timeout: float | None = None,
+    ) -> dict:
         return chat_json(
             base_url=_GROQ_BASE,
             api_key=settings.groq_api_key,
@@ -35,6 +37,7 @@ class GroqProvider(LLMProvider):
             user_prompt=user_prompt,
             max_tokens=max_tokens,
             reasoning_effort="low" if "gpt-oss" in self.model else None,
+            **({"timeout": timeout} if timeout is not None else {}),
         )
 
 
@@ -47,7 +50,9 @@ class OpenRouterProvider(LLMProvider):
     def available(self) -> bool:
         return bool(settings.openrouter_api_key) and self.model.endswith(":free")
 
-    def generate_json(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500) -> dict:
+    def generate_json(
+        self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500, timeout: float | None = None,
+    ) -> dict:
         return chat_json(
             base_url=_OPENROUTER_BASE,
             api_key=settings.openrouter_api_key,
@@ -59,6 +64,7 @@ class OpenRouterProvider(LLMProvider):
                 "HTTP-Referer": "http://localhost",
                 "X-Title": "LinkedIn Connections Intelligence",
             },
+            **({"timeout": timeout} if timeout is not None else {}),
         )
 
 
@@ -77,7 +83,9 @@ class AnthropicProvider(LLMProvider):
     def available(self) -> bool:
         return bool(settings.anthropic_api_key)
 
-    def generate_json(self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500) -> dict:
+    def generate_json(
+        self, system_prompt: str, user_prompt: str, *, max_tokens: int = 1500, timeout: float | None = None,
+    ) -> dict:
         return messages_json(
             api_key=settings.anthropic_api_key,
             model=self.model,
@@ -85,6 +93,7 @@ class AnthropicProvider(LLMProvider):
             user_prompt=user_prompt,
             max_tokens=max_tokens,
             workspace_id=settings.anthropic_workspace_id,
+            **({"timeout": timeout} if timeout is not None else {}),
         )
 
 
