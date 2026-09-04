@@ -69,6 +69,27 @@ def token_overlap(a: str | None, b: str | None) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+#: concept text -> the CompanySemantic boolean field it maps to. Shared by
+#: scoring._score_company_category and career_chronology's transition endpoint
+#: matcher so "startup" / "big tech" resolve identically everywhere (V4 §7,
+#: hardening PART: career-transition dedup).
+CATEGORY_FIELD_MAP = {
+    "startup": "is_startup", "early stage": "is_startup", "early-stage": "is_startup",
+    "big tech": "is_big_tech", "big technology": "is_big_tech", "faang": "is_big_tech",
+    "major technology": "is_big_tech", "large tech": "is_big_tech",
+    "tech": "is_technology_company", "technology": "is_technology_company",
+    "software": "is_technology_company", "tech company": "is_technology_company",
+}
+
+
+def category_field(concept: str) -> str | None:
+    c = norm(concept)
+    for key, fld in sorted(CATEGORY_FIELD_MAP.items(), key=lambda kv: -len(kv[0])):
+        if key in c:
+            return fld
+    return None
+
+
 # ─────────────────── recency / duration weighting (v2) ───────────────────
 
 _RECENCY_FLOOR = 0.6

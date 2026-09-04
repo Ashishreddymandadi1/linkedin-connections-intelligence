@@ -41,10 +41,11 @@ from app.schemas import (
 from app.services.candidate_gate import hard_gate
 from app.services.candidate_pool import get_candidates
 from app.services.judge_validator import validate_person
+from app.services.llm import budget as llm_budget
 from app.services.matching import company_matches, norm_company
 from app.services.person_view import education_to_out, experience_to_out, skill_to_out
 from app.services.query_interpreter import interpret_query
-from app.services.reason_generator import generate_reason
+from app.services.reason_generator import generate_reason, generate_reasons_batch
 from app.services.scoring import ScoredCandidate, ScoringContext, load_facts, score_candidate
 from app.services.semantic_judge import run_judge
 
@@ -61,9 +62,16 @@ def _tier_key(s):
 
 
 def run_connection_search(db: Session, *, dataset_id: str, query: str) -> SearchResponse:
+    llm_budget.clear_budget()  # defensive — a prior request on a reused thread must never leak in
     parsed, provider, model = interpret_query(query)
     log.info("query %r -> %d criteria (intent=%s) via %s",
              query, len(parsed.criteria), parsed.intent, provider)
+
+    # ── hardening PART 6 — soft budget on every LLM call from HERE on (judge /
+    #    audit / reason). Interpretation is foundational, not optional, so it
+    #    is never metered. Cleared unconditionally before returning below. ──
+    llm_budget.start_budget(settings.search_llm_max_calls)
+    calls_interpretation = 0 if provider == "deterministic" else 1
 
     query_embedding = _maybe_embed(query)  # for relevance RANKING only — never gates
     candidates, total = get_candidates(db, dataset_id, parsed, query_embedding)
@@ -193,11 +201,17 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         total_candidates=total_scored,
     )
 
+    # ── batched display-reason generation (hardening PART 10) — ONE LLM call
+    #    for the whole top-N instead of one per candidate. Display-only: never
+    #    affects ranking / qualification / score. ──────────────────────────
+    llm_reason_pool = top[: settings.llm_reason_top_n] if settings.llm_reason_generation else []
+    reasons_by_id = generate_reasons_batch(llm_reason_pool, query) if llm_reason_pool else {}
+
     results: list[SearchResultItem] = []
     for rank, cand in enumerate(top, start=1):
+        reason = reasons_by_id.get(cand.person.id) or generate_reason(cand, query, allow_llm=False)
         item = _to_result_item(
-            db, rank, cand, parsed, query,
-            use_llm_reason=settings.llm_reason_generation and rank <= settings.llm_reason_top_n,
+            db, rank, cand, parsed, query, reason=reason,
             audit=audit_by_id.get(cand.person.id),
         )
         results.append(item)
@@ -214,7 +228,8 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         if cand.person.id in seen_near or len(near_items) >= 5:
             continue
         seen_near.add(cand.person.id)
-        item = _to_result_item(db, len(near_items) + 1, cand, parsed, query, use_llm_reason=False)
+        near_reason = generate_reason(cand, query, allow_llm=False)
+        item = _to_result_item(db, len(near_items) + 1, cand, parsed, query, reason=near_reason)
         near_items.append(item)
         # near matches persist in their OWN bucket — same schema, qualification
         # stays not_match, never mixed into the main results (V4 PART 7 §4).
@@ -226,6 +241,21 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
 
     judge_metadata = judge_run.metadata.as_dict()
     audit_metadata = audit_run.metadata.as_dict() if audit_run else None
+
+    # hardening PART 6 — per-search LLM call tally, no prompts/profile data.
+    # judge/audit batch counts already include every adaptive-split attempt.
+    reason_calls = 1 if (llm_reason_pool and settings.llm_reason_generation
+                        and any(c.evidence for c in llm_reason_pool)) else 0
+    llm_calls = {
+        "query_interpretation": calls_interpretation,
+        "semantic_judge": judge_metadata.get("judge_batch_count", 0),
+        "final_audit": (audit_metadata or {}).get("batch_count", 0),
+        "reason_generation": reason_calls,
+    }
+    llm_calls["total"] = calls_interpretation + llm_calls["semantic_judge"] \
+        + llm_calls["final_audit"] + reason_calls
+    llm_calls["budget"] = {"max_calls": settings.search_llm_max_calls, "used_after_interpretation": llm_budget.used()}
+    llm_budget.clear_budget()
 
     # FINAL validated search-level snapshot (V4 PART 7 §3) — captured here, AFTER
     # _run_final_audit -> final_auditor.finalize(). load_search rebuilds the whole
@@ -257,6 +287,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         llm_model=model,
         judge_metadata=judge_metadata,
         audit_metadata=audit_metadata,
+        llm_calls=llm_calls,
     )
 
 
@@ -488,11 +519,10 @@ def _to_result_item(
     parsed: ParsedSearchQuery,
     query: str,
     *,
-    use_llm_reason: bool = True,
+    reason: str,
     audit: dict | None = None,
 ) -> SearchResultItem:
     p = cand.person
-    reason = generate_reason(cand, query, allow_llm=use_llm_reason)
 
     def _terms(*types: str) -> set[str]:
         return {

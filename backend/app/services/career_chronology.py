@@ -14,7 +14,7 @@ import re
 
 from app.constants import TriState
 from app.schemas import EvidenceItem, SearchCriterion
-from app.services.matching import concept_overlap, norm
+from app.services.matching import category_field, company_matches, concept_overlap, norm
 
 _NOW = (_dt.date.today().year, _dt.date.today().month)
 
@@ -107,15 +107,42 @@ _FROM_TO_RE = re.compile(r"from\s+(.+?)\s+to\s+(.+)$", re.I)
 _THRESH = 0.5
 
 
-def score_transition(facts, crit: SearchCriterion) -> tuple[float, list[EvidenceItem], str]:
+def _endpoint_strength(e, concept: str, ctx, sem_by_exp: dict) -> float:
+    """How strongly experience ``e`` matches a transition ENDPOINT (a company
+    name, a company category like "startup"/"big tech", or a role/industry
+    phrase).
+
+    Reuses the SAME authoritative matchers the sibling past_company /
+    company_category criteria already use for the identical fact, instead of
+    re-deriving an independent (weaker) verdict from free-text overlap alone —
+    otherwise a candidate with a verified past employer AND a verified current
+    company category could still be denied the transition itself, because its
+    own matcher couldn't see what the other two criteria already established
+    (hardening pass: generic career-transition dedup, no company special-casing).
+    """
+    best = _matches_concept(e, concept, sem_by_exp)
+    company_name = getattr(e, "company_name", None)
+    if company_name and company_matches(company_name, concept):
+        best = max(best, 1.0)
+    field_name = category_field(concept)
+    if field_name and ctx is not None:
+        from app.services.company_intel import company_key
+
+        row = ctx.company_class.get(company_key(getattr(e, "company_id", None), company_name))
+        if row and row.get(field_name) is True and float(row.get("confidence") or 0.0) >= 0.6:
+            best = max(best, 1.0)
+    return best
+
+
+def score_transition(facts, crit: SearchCriterion, ctx=None) -> tuple[float, list[EvidenceItem], str]:
     m = _FROM_TO_RE.search(crit.concept or "")
     if not m:
         return 0.0, [], TriState.UNKNOWN
     frm, to = m.group(1).strip(), m.group(2).strip()
     sem_by_exp = exp_semantics_by_id(facts.semantic)
     exps = facts.experiences
-    from_hits = [e for e in exps if _matches_concept(e, frm, sem_by_exp) >= _THRESH]
-    to_hits = [e for e in exps if _matches_concept(e, to, sem_by_exp) >= _THRESH]
+    from_hits = [e for e in exps if _endpoint_strength(e, frm, ctx, sem_by_exp) >= _THRESH]
+    to_hits = [e for e in exps if _endpoint_strength(e, to, ctx, sem_by_exp) >= _THRESH]
     if not from_hits or not to_hits:
         return 0.0, [], TriState.UNKNOWN
 

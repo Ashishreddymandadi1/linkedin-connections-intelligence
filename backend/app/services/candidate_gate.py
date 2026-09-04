@@ -156,7 +156,7 @@ def hard_gate(facts: ProfileFacts, parsed: ParsedSearchQuery, ctx: ScoringContex
 
         # ── required career transition (chronology-authoritative) ──
         if crit.type == CriterionType.CAREER_TRANSITION and crit.operator != Operator.NOT:
-            _s, _ev, status = _career.score_transition(facts, crit)
+            _s, _ev, status = _career.score_transition(facts, crit, ctx)
             statuses[crit.id] = status
             if status == TriState.FALSE:
                 return _reject(pid, crit,
