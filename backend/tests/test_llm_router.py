@@ -18,8 +18,10 @@ from app.services.llm.base import (
     LLMAuthError,
     LLMBadOutput,
     LLMConfigError,
+    LLMOutputTruncated,
     LLMProvider,
     LLMRateLimited,
+    LLMRequestTooLarge,
     LLMTransport,
     LLMUnavailable,
 )
@@ -73,6 +75,10 @@ class FakeProvider(LLMProvider):
             raise LLMBadOutput("not json")
         if b == "badschema":
             return {"answer": "hi"}  # missing score
+        if b == "truncated":
+            raise LLMOutputTruncated("hit max_tokens")
+        if b == "413":
+            raise LLMRequestTooLarge("payload too large")
         raise AssertionError(b)
 
 
@@ -246,3 +252,72 @@ def test_schema_validation_failure_moves_on():
     good = FakeProvider("good", "ok")
     res = _run([bad, good])
     assert res and res[1] == "good"
+
+
+# ─────────────────────── hardening PART 5/22 — truncation returns to caller ───────────────────────
+
+
+def test_truncation_returns_to_caller_immediately_not_the_next_provider():
+    """The core live-failure fix: an oversized-output truncation must NOT fall
+    through to the next provider with the identical oversized request (that
+    provider would very likely truncate/413 the same way, wasting a round trip
+    that the caller should instead spend on a SMALLER, split request). The
+    router returns None right away and the next provider is never called."""
+    anth = FakeProvider(LLMProviderName.ANTHROPIC, "truncated")
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "ok")
+    res = _run([anth, groq_p])
+    assert res is None
+    assert anth.calls == 1
+    assert groq_p.calls == 0  # never attempted with the same oversized payload
+
+
+def test_truncation_does_not_trip_the_circuit():
+    """Output truncation is REQUEST-specific (this particular batch was too
+    big), not a provider-health signal — it must never cool the provider down;
+    a smaller request must be allowed to try the SAME provider right away."""
+    name = LLMProviderName.ANTHROPIC
+    _run([FakeProvider(name, "truncated")])
+    assert not circuit.is_open(name)
+    # the same provider, now with a small enough request, succeeds immediately
+    res = _run([FakeProvider(name, "ok")])
+    assert res and res[1] == name
+
+
+# ─────────────────────── hardening PART 6/23 — 413 is request-specific ───────────────────────
+
+
+def test_413_returns_to_caller_immediately_not_the_next_provider():
+    groq_p = FakeProvider(LLMProviderName.GROQ_PRIMARY, "413")
+    groq_f = FakeProvider(LLMProviderName.GROQ_FALLBACK, "ok")
+    res = _run([groq_p, groq_f])
+    assert res is None
+    assert groq_p.calls == 1
+    assert groq_f.calls == 0  # never attempted with the same oversized payload
+
+
+def test_413_does_not_trip_the_circuit_and_a_smaller_request_succeeds_right_after():
+    """The exact scenario the mission called out: '413 is request-specific. It
+    does NOT mean Groq is down.' One oversized 413 must not globally disable
+    the provider for 15 minutes — the very next (smaller) request to the SAME
+    provider must be attempted normally, not skipped as circuit-open."""
+    name = LLMProviderName.GROQ_PRIMARY
+    large = FakeProvider(name, "413")
+    _run([large])
+    assert large.calls == 1
+    assert not circuit.is_open(name)
+
+    small = FakeProvider(name, "ok")
+    res = _run([small])
+    assert res and res[1] == name
+    assert small.calls == 1  # the smaller request was actually attempted, not skipped
+
+
+def test_413_after_repeated_hits_still_does_not_trip_the_circuit():
+    """Unlike transient transport/rate-limit failures (which trip after 3
+    consecutive hits), request_too_large must NEVER trip the circuit no matter
+    how many times it happens — each one is a fact about that specific
+    request's size, not the provider's health."""
+    name = LLMProviderName.GROQ_PRIMARY
+    for _ in range(5):
+        _run([FakeProvider(name, "413")])
+    assert not circuit.is_open(name)

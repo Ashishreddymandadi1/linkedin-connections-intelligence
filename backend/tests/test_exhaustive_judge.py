@@ -177,6 +177,83 @@ def test_all_batches_fail_is_unavailable_not_a_crash(monkeypatch):
     assert all(v["mentor_evidence"]["status"] == TriState.UNKNOWN for v in run.verdicts.values())
 
 
+# ─────────────────────── hardening PART 22 — exact live-failure simulation ───────────────────────
+
+
+def test_exact_live_failure_recovers_via_split_and_single_person_retry(monkeypatch):
+    """Reproduces the live incident: a query with 4 required criteria per
+    person ("research plus industry experience" style), a batch that
+    truncates at every size down to a single person, and even that single
+    person truncating once at the estimated budget. Proves: adaptive splitting
+    isolates single-person leaves, the bounded single-person double-budget
+    retry (hardening PART 7) recovers them, there is no infinite recursion /
+    unbounded call count, and the run still returns full, usable verdicts —
+    never hangs, never crashes."""
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_batch_size", 9)  # the size that got stuck live
+
+    four_crits = [
+        SearchCriterion(id="research", type=CriterionType.PROFESSIONAL_CONCEPT,
+                        concept="research experience", scope=Scope.CAREER, weight=25, required=True),
+        SearchCriterion(id="industry", type=CriterionType.INDUSTRY_EXPERIENCE,
+                        concept="industry experience", scope=Scope.CAREER, weight=25, required=True),
+        SearchCriterion(id="leadership", type=CriterionType.ROLE_FUNCTION,
+                        concept="engineering leadership", scope=Scope.CAREER, weight=25, required=True),
+        SearchCriterion(id="mentoring", type=CriterionType.PROFESSIONAL_CONCEPT,
+                        concept="mentoring", scope=Scope.CAREER, weight=25, required=True),
+    ]
+    plan = ParsedSearchQuery(criteria=four_crits)
+    bundle = _bundle(9)
+
+    call_sizes: list[int] = []
+    single_person_seen: set[str] = set()
+
+    import re
+
+    def fake_generate_structured(system, user, schema, *, max_tokens, operation, return_meta):
+        n = user.count('"person_id":')
+        call_sizes.append(n)
+        if n == 1:
+            pid = re.search(r'"person_id":\s*"(p\d+)"', user).group(1)
+            if pid in single_person_seen:
+                # the bounded double-budget retry (hardening PART 7) succeeds
+                batch = CompactJudgeBatch.model_validate({"people": [{
+                    "person_id": pid,
+                    "criteria": [{"criterion_id": c.id, "status": "true", "confidence": 0.8,
+                                 "supporting_refs": ["exp:e0"], "reason": ""} for c in four_crits],
+                }]})
+                meta = {"operation": operation, "selected_provider": "mock", "selected_model": "m1",
+                       "attempts": [{"provider": "mock", "status": "success"}]}
+                return batch, "mock", "m1", meta
+            single_person_seen.add(pid)
+        meta = {"operation": operation, "selected_provider": None, "selected_model": None,
+               "attempts": [{"provider": "mock", "status": "output_truncated"}]}
+        return None, meta
+
+    monkeypatch.setattr(semantic_judge, "generate_structured", fake_generate_structured)
+    run = semantic_judge.run_judge(
+        "research plus industry experience", plan, bundle, ScoringContext(),
+        network_size=987, pool_size=987, hard_rejected_count=0,
+    )
+
+    assert len(run.verdicts) == 9
+    assert all(v["research"]["status"] == TriState.TRUE for v in run.verdicts.values())
+    assert all(v["industry"]["status"] == TriState.TRUE for v in run.verdicts.values())
+    # every eventual leaf was size 1 (fully split down), and each single-person
+    # leaf was called at most twice (initial + one bounded retry) -- no
+    # unbounded recursion / repeated identical calls
+    assert max(call_sizes) <= 9
+    assert call_sizes.count(1) == 18  # 9 people x (1 truncated attempt + 1 successful retry)
+    assert len(call_sizes) < 40
+    assert run.metadata.judge_status == JudgeStatus.FULL
+    # the internal single-person retry (hardening PART 7) fully resolves inside
+    # _call_judge and is never surfaced to adaptive_batch as a "truncated"
+    # outcome once it succeeds -- adaptive_batch's own counter only reflects
+    # the multi-person splits that actually happened above the leaf level.
+    assert run.metadata.truncations >= 3
+    assert run.metadata.adaptive_splits >= 3
+
+
 # ─────────────────────── hardening PART 14 — search deadline ───────────────────────
 
 
