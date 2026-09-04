@@ -11,6 +11,7 @@ from app.services.llm.base import (
     LLMAuthError,
     LLMBadOutput,
     LLMConfigError,
+    LLMOutputTruncated,
     LLMRateLimited,
     LLMTransport,
     LLMUnavailable,
@@ -88,7 +89,18 @@ def chat_json(
 
     body = resp.json()
     try:
-        content = body["choices"][0]["message"]["content"]
+        choice = body["choices"][0]
+        content = choice["message"]["content"]
+        finish_reason = choice.get("finish_reason")
     except (KeyError, IndexError, TypeError) as e:
         raise LLMBadOutput(f"unexpected response shape: {e}") from e
-    return _extract_json(content)
+
+    try:
+        return _extract_json(content)
+    except LLMBadOutput as e:
+        if finish_reason == "length":
+            raise LLMOutputTruncated(
+                f"provider hit the token limit (finish_reason=length) before completing "
+                f"valid JSON ({len(content or '')} chars produced): {e}"
+            ) from e
+        raise

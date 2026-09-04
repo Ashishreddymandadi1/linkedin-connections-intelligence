@@ -299,7 +299,7 @@ def _fake_audit(decisions_by_pid, *, capture=None, none_after=None):
         if capture is not None:
             capture.append({"payload": payload, "packets": packets, "first_pass": first_pass_by_id})
         if none_after is not None and idx >= none_after:
-            return None
+            return "failed", None, None, None
         people = []
         for pkt in packets:
             pid = pkt["person_id"]
@@ -312,7 +312,7 @@ def _fake_audit(decisions_by_pid, *, capture=None, none_after=None):
                     status_review="unsupported" if d == "incorrect" else "supported", reason="r",
                     contradicting_evidence_refs=([f"exp:{cur_id}"] if d == "incorrect" else []))
                     for c in payload["criteria"] if c["required"]]))
-        return FinalAuditBatch(people=people), "mock:prov", "mock-1"
+        return "ok", FinalAuditBatch(people=people), "mock:prov", "mock-1"
 
     return fake
 
@@ -333,7 +333,7 @@ def test_promotion_uses_only_the_already_audited_buffer(monkeypatch):
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_buffer", 2)
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_batch_size", 10)
     calls = []
-    monkeypatch.setattr(final_auditor, "_audit_batch", _fake_audit({"p1": "incorrect"}, capture=calls))
+    monkeypatch.setattr(final_auditor, "_call_audit", _fake_audit({"p1": "incorrect"}, capture=calls))
 
     plan = _plan(_crit(id="c", type=CriterionType.PROFESSIONAL_CONCEPT, concept="x", required=True))
     pool = _pool(5)
@@ -362,7 +362,7 @@ def test_promotion_uses_only_the_already_audited_buffer(monkeypatch):
 def test_partial_audit_failure_does_not_crash(monkeypatch):
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_batch_size", 10)
-    monkeypatch.setattr(final_auditor, "_audit_batch", _fake_audit({}, none_after=1))
+    monkeypatch.setattr(final_auditor, "_call_audit", _fake_audit({}, none_after=1))
 
     plan = _plan(_crit(id="c", type=CriterionType.PROFESSIONAL_CONCEPT, concept="x", required=True))
     pool = _pool(30)
@@ -383,7 +383,7 @@ def test_partial_audit_failure_does_not_crash(monkeypatch):
 def test_oversized_audit_packet_is_left_unaudited(monkeypatch):
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_max_batch_chars", 400)
-    monkeypatch.setattr(final_auditor, "_audit_batch", _fake_audit({}))
+    monkeypatch.setattr(final_auditor, "_call_audit", _fake_audit({}))
     monkeypatch.setattr(final_auditor, "build_packets", lambda *a, **k: [
         {"person_id": "small", "current": {"experience_id": "e1", "is_current": True}, "past": [],
          "education": [], "experience_semantics": [], "company_classifications": [], "skills": [],
@@ -409,7 +409,7 @@ def test_oversized_audit_packet_is_left_unaudited(monkeypatch):
 def test_query_plan_and_first_pass_reach_the_auditor(monkeypatch):
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
     calls = []
-    monkeypatch.setattr(final_auditor, "_audit_batch", _fake_audit({}, capture=calls))
+    monkeypatch.setattr(final_auditor, "_call_audit", _fake_audit({}, capture=calls))
 
     plan = _mentor_plan()
     plan.target_person_context = {"field": "backend engineering", "goal": "engineering management"}
@@ -446,7 +446,8 @@ def test_search_runs_audit_after_scoring_and_returns_metadata(client, monkeypatc
     import app.services.company_intel as ci
     monkeypatch.setattr(ci, "get_or_classify",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no classify during search")))
-    monkeypatch.setattr(semantic_judge, "_judge_batch", lambda *a, **k: None)  # judge unavailable -> deterministic
+    monkeypatch.setattr(semantic_judge, "_call_judge",
+                        lambda *a, **k: ("failed", None, None, None))  # judge unavailable -> deterministic
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
 
     seen_pids = []
@@ -459,9 +460,9 @@ def test_search_runs_audit_after_scoring_and_returns_metadata(client, monkeypatc
                                                criterion_id=c["id"], status_review="supported")
                                                for c in payload["criteria"] if c["required"]])
                   for p in packets]
-        return FinalAuditBatch(people=people), "mock:prov", "mock-1"
+        return "ok", FinalAuditBatch(people=people), "mock:prov", "mock-1"
 
-    monkeypatch.setattr(final_auditor, "_audit_batch", fake_audit)
+    monkeypatch.setattr(final_auditor, "_call_audit", fake_audit)
 
     ds = _enriched_dataset(client)
     body = client.post("/search", json={

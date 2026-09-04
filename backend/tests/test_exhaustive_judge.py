@@ -62,7 +62,10 @@ def _mentor_plan(*, extra_crits=()) -> ParsedSearchQuery:
 
 
 def _fake_judge(*, true_ids=None, none_after=None, omit_people=(), omit_criteria=None, capture=None):
-    """Fake ``_judge_batch``. ``none_after`` -> batch index from which the call fails."""
+    """Fake ``_call_judge`` (the adaptive-splitter's CallFn seam). ``none_after``
+    -> batch index from which the call fails (outcome "failed", never "truncated" —
+    these fakes never trigger a split, so one call == one top-level batch, same
+    as the pre-adaptive-splitting behaviour)."""
     state = {"batch": 0}
 
     def fake(payload, packets):
@@ -71,7 +74,7 @@ def _fake_judge(*, true_ids=None, none_after=None, omit_people=(), omit_criteria
         if capture is not None:
             capture.append({"payload": payload, "packets": packets})
         if none_after is not None and idx >= none_after:
-            return None
+            return "failed", None, None, None
         people = []
         for pkt in packets:
             pid = pkt["person_id"]
@@ -95,7 +98,7 @@ def _fake_judge(*, true_ids=None, none_after=None, omit_people=(), omit_criteria
                     experience_ids=[first_exp] if first_exp else [],
                 ))
             people.append(JudgePersonVerdict(person_id=pid, criteria=verdicts, overall_fit="strong"))
-        return JudgeBatch(people=people), "mock:provider", "mock-model-1"
+        return "ok", JudgeBatch(people=people), "mock:provider", "mock-model-1"
 
     return fake
 
@@ -112,7 +115,7 @@ def test_all_viable_candidates_are_judged_in_batches(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_batch_size", 10)
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_max_candidates", 0)
     calls = []
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge(capture=calls))
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge(capture=calls))
 
     run = semantic_judge.run_judge(
         "career mentors", _mentor_plan(), _bundle(100), ScoringContext(),
@@ -130,7 +133,7 @@ def test_all_viable_candidates_are_judged_in_batches(monkeypatch):
 def test_no_hidden_60_person_cap(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_max_candidates", 0)
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge())
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge())
     run = semantic_judge.run_judge("x", _mentor_plan(), _bundle(75), ScoringContext(),
                                    network_size=75, pool_size=75, hard_rejected_count=0)
     assert run.metadata.judge_candidate_count == 75 and not run.metadata.capped
@@ -139,7 +142,7 @@ def test_no_hidden_60_person_cap(monkeypatch):
 def test_explicit_cap_is_respected_and_reported(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_max_candidates", 20)
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge())
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge())
     run = semantic_judge.run_judge("x", _mentor_plan(), _bundle(50), ScoringContext(),
                                    network_size=50, pool_size=50, hard_rejected_count=0)
     assert run.metadata.judge_candidate_count == 20
@@ -152,7 +155,7 @@ def test_explicit_cap_is_respected_and_reported(monkeypatch):
 def test_partial_batch_failure_keeps_earlier_verdicts(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_batch_size", 10)
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge(none_after=6))
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge(none_after=6))
     run = semantic_judge.run_judge("x", _mentor_plan(), _bundle(100), ScoringContext(),
                                    network_size=100, pool_size=100, hard_rejected_count=0)
     judged = [pid for pid, v in run.verdicts.items()
@@ -167,7 +170,7 @@ def test_partial_batch_failure_keeps_earlier_verdicts(monkeypatch):
 
 def test_all_batches_fail_is_unavailable_not_a_crash(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge(none_after=0))
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge(none_after=0))
     run = semantic_judge.run_judge("x", _mentor_plan(), _bundle(30), ScoringContext(),
                                    network_size=30, pool_size=30, hard_rejected_count=0)
     assert run.metadata.judge_status == JudgeStatus.UNAVAILABLE
@@ -186,7 +189,7 @@ def test_missing_person_and_criteria_become_unknown(monkeypatch):
         SearchCriterion(id="hc", type=CriterionType.INDUSTRY_EXPERIENCE, concept="healthcare industry",
                         weight=20, required=True),
     ))
-    monkeypatch.setattr(semantic_judge, "_judge_batch",
+    monkeypatch.setattr(semantic_judge, "_call_judge",
                         _fake_judge(omit_people={"p0"}, omit_criteria={("p1", "ai"), ("p1", "hc")}))
     run = semantic_judge.run_judge("x", plan, _bundle(10), ScoringContext(),
                                    network_size=10, pool_size=10, hard_rejected_count=0)
@@ -208,17 +211,21 @@ def test_judge_batch_uses_the_router(monkeypatch):
 
     def fake_generate(system, user, schema, **kw):
         seen["operation"] = kw.get("operation")
-        return JudgeBatch(people=[]), "anthropic:paid", "claude-haiku-4-5"
+        meta = {"operation": kw.get("operation"), "selected_provider": "anthropic:paid",
+               "selected_model": "claude-haiku-4-5", "attempts": [{"provider": "anthropic:paid", "status": "success"}]}
+        return JudgeBatch(people=[]), "anthropic:paid", "claude-haiku-4-5", meta
 
     monkeypatch.setattr(semantic_judge, "generate_structured", fake_generate)
-    res = semantic_judge._judge_batch({"criteria_to_judge": []}, [{"person_id": "p0"}])
-    assert res is not None and res[1] == "anthropic:paid"
+    outcome, payload, provider, model = semantic_judge._call_judge({"criteria_to_judge": []}, [{"person_id": "p0"}])
+    assert outcome == "ok" and provider == "anthropic:paid"
     assert seen["operation"] == "semantic_judge"
 
 
 def test_judge_batch_none_when_router_exhausted(monkeypatch):
-    monkeypatch.setattr(semantic_judge, "generate_structured", lambda *a, **k: None)
-    assert semantic_judge._judge_batch({"criteria_to_judge": []}, [{"person_id": "p0"}]) is None
+    monkeypatch.setattr(semantic_judge, "generate_structured",
+                        lambda *a, **k: (None, {"attempts": [{"provider": "anthropic:paid", "status": "bad_output"}]}))
+    outcome, payload, provider, model = semantic_judge._call_judge({"criteria_to_judge": []}, [{"person_id": "p0"}])
+    assert outcome == "failed"
 
 
 # ─────────────────────── §55/§56/§57 — the SearchPlan reaches the judge ───────────────────────
@@ -227,7 +234,7 @@ def test_judge_batch_none_when_router_exhausted(monkeypatch):
 def test_query_intent_and_relational_context_reach_the_judge(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     calls = []
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge(capture=calls))
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge(capture=calls))
     semantic_judge.run_judge("Who could mentor a backend engineer moving into management?",
                              _mentor_plan(), _bundle(3), ScoringContext(),
                              network_size=3, pool_size=3, hard_rejected_count=0)
@@ -240,7 +247,7 @@ def test_query_intent_and_relational_context_reach_the_judge(monkeypatch):
 def test_modality_reaches_the_judge(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     calls = []
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge(capture=calls))
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge(capture=calls))
     plan = ParsedSearchQuery(criteria=[
         SearchCriterion(id="hipaa", type=CriterionType.PROFESSIONAL_CONCEPT,
                         concept="HIPAA compliance experience", weight=100,
@@ -255,7 +262,7 @@ def test_modality_reaches_the_judge(monkeypatch):
 def test_boolean_structure_reaches_the_judge(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     calls = []
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _fake_judge(capture=calls))
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge(capture=calls))
     plan = ParsedSearchQuery(criteria=[
         SearchCriterion(id="cyber", type=CriterionType.PROFESSIONAL_CONCEPT,
                         concept="cybersecurity experience", weight=33, required=True),
@@ -376,7 +383,7 @@ def test_non_judgeable_criterion_verdict_is_dropped():
 
 def test_mode_off_never_judges(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "off")
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _raise_judge)
+    monkeypatch.setattr(semantic_judge, "_call_judge", _raise_judge)
     run = semantic_judge.run_judge("x", _mentor_plan(), _bundle(5), ScoringContext(),
                                    network_size=5, pool_size=5, hard_rejected_count=0)
     assert run.metadata.judge_status == JudgeStatus.NOT_USED and run.verdicts == {}
@@ -384,7 +391,7 @@ def test_mode_off_never_judges(monkeypatch):
 
 def test_no_judgeable_criteria_is_not_used(monkeypatch):
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
-    monkeypatch.setattr(semantic_judge, "_judge_batch", _raise_judge)
+    monkeypatch.setattr(semantic_judge, "_call_judge", _raise_judge)
     plan = ParsedSearchQuery(criteria=[
         SearchCriterion(id="c", type=CriterionType.CURRENT_COMPANY, value="Google", weight=100, required=True),
     ])
@@ -410,7 +417,7 @@ def _all_true_batch(payload, packets):
                 experience_ids=[first_exp] if first_exp else [],
             ) for c in payload["criteria_to_judge"]],
         ))
-    return JudgeBatch(people=people), "mock:provider", "mock-model-1"
+    return "ok", JudgeBatch(people=people), "mock:provider", "mock-model-1"
 
 
 def test_search_judges_every_viable_candidate_and_min_score_does_not_prefilter(client, monkeypatch):
@@ -422,7 +429,7 @@ def test_search_judges_every_viable_candidate_and_min_score_does_not_prefilter(c
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no classify during search")))
 
     seen = []
-    monkeypatch.setattr(semantic_judge, "_judge_batch",
+    monkeypatch.setattr(semantic_judge, "_call_judge",
                         lambda payload, packets: (seen.append(len(packets)), _all_true_batch(payload, packets))[1])
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_max_candidates", 0)
@@ -447,7 +454,7 @@ def test_search_judges_every_viable_candidate_and_min_score_does_not_prefilter(c
 def test_search_survives_judge_unavailable(client, monkeypatch):
     from tests.test_search import _enriched_dataset
 
-    monkeypatch.setattr(semantic_judge, "_judge_batch", lambda *a, **k: None)
+    monkeypatch.setattr(semantic_judge, "_call_judge", lambda *a, **k: ("failed", None, None, None))
     monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
     ds = _enriched_dataset(client)
     body = client.post("/search", json={

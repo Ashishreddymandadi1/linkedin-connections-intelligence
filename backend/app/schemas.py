@@ -742,3 +742,8 @@ class SearchResponse(BaseModel):
     #: post-``finalize()`` in ``search_run_states`` and rebuilt by ``load_search``
     #: (V4 PART 7).
     audit_metadata: dict[str, Any] | None = None
+    #: hardening PART 6 — per-search LLM call tally (query_interpretation,
+    #: semantic_judge, final_audit, reason_generation, total) + budget info. No
+    #: prompts, no profile data. Live-response only for now (not yet persisted —
+    #: same bootstrapping step judge/audit metadata went through before PART 7).
+    llm_calls: dict[str, Any] | None = None

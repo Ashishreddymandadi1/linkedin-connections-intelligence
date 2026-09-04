@@ -260,9 +260,9 @@ def test_audit_status_partial_when_required_reviews_are_omitted(monkeypatch):
             criteria=[FinalAuditCriterionReview(criterion_id="a", status_review="supported",
                                                 supporting_evidence_refs=["exp:cur"])])
             for pkt in packets]
-        return FinalAuditBatch(people=people), "mock", "m1"
+        return "ok", FinalAuditBatch(people=people), "mock", "m1"
 
-    monkeypatch.setattr(final_auditor, "_audit_batch", fake)
+    monkeypatch.setattr(final_auditor, "_call_audit", fake)
 
     plan = _plan(_crit(id="a", type=CriterionType.PROFESSIONAL_CONCEPT, concept="x", required=True),
                  _crit(id="b", type=CriterionType.PROFESSIONAL_CONCEPT, concept="y", required=True))
@@ -297,14 +297,14 @@ def test_top_connections_is_the_only_result_count(client, monkeypatch):
     monkeypatch.setattr("app.services.search_service.settings.top_connections", 3)
     monkeypatch.setattr("app.services.search_service.settings.final_result_audit_top_n", 20)
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
-    monkeypatch.setattr(semantic_judge, "_judge_batch", lambda *a, **k: None)
+    monkeypatch.setattr(semantic_judge, "_call_judge", lambda *a, **k: ("failed", None, None, None))
 
     def fake_audit(payload, packets, first_pass_by_id):
         people = [FinalAuditPersonDecision(person_id=p["person_id"], decision="approved", confidence=0.8,
                                            reason="ok", criteria=[]) for p in packets]
-        return FinalAuditBatch(people=people), "mock", "m1"
+        return "ok", FinalAuditBatch(people=people), "mock", "m1"
 
-    monkeypatch.setattr(final_auditor, "_audit_batch", fake_audit)
+    monkeypatch.setattr(final_auditor, "_call_audit", fake_audit)
 
     ds = _enriched_dataset(client)
     body = client.post("/search", json={"dataset_id": ds, "query": "engineers"}).json()

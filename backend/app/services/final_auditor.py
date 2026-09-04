@@ -30,6 +30,7 @@ from app.config import settings
 from app.constants import AuditDecision, AuditStatus
 from app.schemas import FinalAuditBatch, ParsedSearchQuery
 from app.services.judge_packet import build_packets
+from app.services.llm.adaptive_batch import run_adaptive
 from app.services.llm.router import generate_structured
 from app.services.semantic_judge import _make_batches
 
@@ -98,6 +99,9 @@ class AuditMetadata:
     candidates_with_incomplete_reviews: int = 0
     providers: dict[str, int] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
+    #: hardening PART 3 — shared adaptive-split behaviour with the judge.
+    truncations: int = 0
+    adaptive_splits: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -117,6 +121,8 @@ class AuditMetadata:
             "candidates_with_incomplete_reviews": self.candidates_with_incomplete_reviews,
             "providers": self.providers,
             "models": self.models,
+            "truncations": self.truncations,
+            "adaptive_splits": self.adaptive_splits,
         }
 
 
@@ -157,24 +163,28 @@ def run_final_audit(
         size=settings.final_result_audit_batch_size,
         max_chars=settings.final_result_audit_max_batch_chars,
     )
-    meta.batch_count = len(batches)
     meta.oversized_packets = len(oversized)
     if oversized:
         log.warning("audit: %d packet(s) too large — left unaudited: %s", len(oversized), oversized[:10])
 
     decisions: dict[str, dict] = {}
     for batch in batches:
-        res = _audit_batch(payload, batch, first_pass_by_id)
-        if res is None:
-            meta.failed_batches += 1
-            continue
-        fab, provider, model = res
-        meta.successful_batches += 1
-        meta.providers[provider] = meta.providers.get(provider, 0) + 1
-        if model and model not in meta.models:
-            meta.models.append(model)
-        for pd in fab.people:
-            decisions[pd.person_id] = pd.model_dump()
+        leaves, stats = run_adaptive(batch, lambda pkts: _call_audit(payload, pkts, first_pass_by_id))
+        meta.batch_count += stats.batches_attempted
+        meta.successful_batches += stats.successful_batches
+        meta.failed_batches += stats.failed_batches
+        meta.truncations += stats.truncations
+        meta.adaptive_splits += stats.adaptive_splits
+        for prov, n in stats.providers.items():
+            meta.providers[prov] = meta.providers.get(prov, 0) + n
+        for m in stats.models:
+            if m not in meta.models:
+                meta.models.append(m)
+        for leaf in leaves:
+            if leaf.outcome != "ok":
+                continue
+            for pd in leaf.payload.people:
+                decisions[pd.person_id] = pd.model_dump()
 
     for c in audit_pool:
         if c.person.id not in decisions:
@@ -277,9 +287,11 @@ def _first_pass(cand, ctx) -> dict:
     }
 
 
-def _audit_batch(payload: dict, packets: list[dict], first_pass_by_id: dict):
-    """One batched audit request through the central router. Returns
-    ``(FinalAuditBatch, provider, model)`` or ``None`` when every provider failed."""
+def _call_audit(payload: dict, packets: list[dict], first_pass_by_id: dict) -> tuple[str, object, str | None, str | None]:
+    """One batched audit request through the router — the ``CallFn`` the
+    adaptive splitter drives (hardening PART 3, shared with the judge). Returns
+    ``("ok", FinalAuditBatch, provider, model)``, ``("truncated", None, None,
+    None)``, or ``("failed", None, None, None)``."""
     people = [
         {"packet": pkt, "first_pass": first_pass_by_id.get(pkt["person_id"], {})}
         for pkt in packets
@@ -301,8 +313,12 @@ def _audit_batch(payload: dict, packets: list[dict], first_pass_by_id: dict):
         _AUDIT_SYSTEM, user, FinalAuditBatch,
         max_tokens=min(4000, 500 + 360 * len(packets)),
         operation="final_result_audit",
+        return_meta=True,
     )
-    if result is None:
-        return None
-    fab, provider, model = result
-    return fab, provider, model
+    if result[0] is not None:
+        fab, provider, model, _meta = result
+        return "ok", fab, provider, model
+    _, meta = result
+    if any(a.get("status") == "output_truncated" for a in meta.get("attempts", [])):
+        return "truncated", None, None, None
+    return "failed", None, None, None

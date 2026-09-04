@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     llm_query_interpretation: bool = True  # False -> deterministic query parser only
     llm_reason_generation: bool = True     # False -> deterministic reason templates
     llm_reason_top_n: int = 8              # LLM reasons for the top N; template for the rest
+    #: hardening PART 6 — soft cap on LLM calls AFTER query interpretation (judge
+    #: + audit + reason). 0 = unlimited. Never causes an incorrect result: once
+    #: hit, remaining optional work is skipped, deterministic results stand, and
+    #: unresolved conditions stay UNKNOWN with judge/audit status PARTIAL.
+    search_llm_max_calls: int = 0
 
     # ── Search quality v2 ────────────────────────────────────
     relevance_weight: float = 20.0         # points reserved for whole-profile relevance

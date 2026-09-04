@@ -1,16 +1,29 @@
 """Exhaustive batched LLM semantic judge (V4 PART 3 §8–§10, §19, §27–§31).
 
-In ``all_viable`` mode EVERY candidate that passed the hard-fact gate is judged
-— no ambiguity band, no 60-person cap. Candidates are sent in BATCHES
-(``semantic_judge_batch_size``, split further if a batch is too large for the
-provider) through the central LLM router. The model judges professional
+In ``all_viable`` mode EVERY candidate with genuine unresolved REQUIRED
+semantic uncertainty is judged — no artificial cap, no reduction in recall.
+"Genuine unresolved uncertainty" is a testable decision (``needs_semantic_
+judge`` / ``candidate_needs_judge``, hardening PART 4/5): a candidate whose
+required judgeable criteria are ALL already TRUE/FALSE from stored facts,
+cached company classification, or stored ProfileSemantic v3 data never reaches
+the judge at all — nor does one already sealed NOT_MATCH by a different
+required criterion, since resolving this one couldn't change that outcome.
+This is what keeps a ~1,000-person broad query from generating ~100 judge
+requests: most candidates are already decided before any query-time LLM call
+is even considered.
+
+Candidates that DO need judging are sent in BATCHES (``semantic_judge_batch_
+size``) through the central LLM router, with adaptive splitting on truncation
+(``app.services.llm.adaptive_batch`` — shared with the final auditor): a batch
+whose response hits ``max_tokens`` is cut in half and retried as two smaller
+requests rather than being retried identically. The model judges professional
 MEANING against a compact, evidence-referenced packet; it may not invent
 employers, roles, dates, skills, education or references.
 
 Every verdict is validated downstream (``judge_validator``) before it is
 allowed to change a score. A missing person / criterion becomes UNKNOWN, never
-an assumed TRUE/FALSE. A partial batch failure keeps the verdicts already
-obtained.
+an assumed TRUE/FALSE. A partial batch failure (or an unresolved truncation)
+keeps the verdicts already obtained from every other batch.
 """
 from __future__ import annotations
 
@@ -24,10 +37,12 @@ from app.constants import (
     JUDGEABLE_CRITERION_TYPES,
     JudgeMode,
     JudgeStatus,
+    Qualification,
     TriState,
 )
 from app.schemas import JudgeBatch, ParsedSearchQuery
 from app.services.judge_packet import build_packets, plan_payload
+from app.services.llm.adaptive_batch import run_adaptive
 from app.services.llm.router import generate_structured
 
 log = logging.getLogger("app.judge")
@@ -94,6 +109,14 @@ class JudgeMetadata:
     providers: dict[str, int] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
     prompt_chars: int = 0
+    #: hardening PART 3 — batches that came back truncated (max_tokens) and how
+    #: many times a truncated batch was cut in half and retried as two.
+    truncations: int = 0
+    adaptive_splits: int = 0
+    #: hardening PART 4 — candidates already fully decided from stored facts /
+    #: semantics before any query-time LLM call was even considered.
+    candidates_decided_locally: int = 0
+    candidates_needing_llm: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -116,6 +139,10 @@ class JudgeMetadata:
             "providers": self.providers,
             "models": self.models,
             "prompt_chars": self.prompt_chars,
+            "truncations": self.truncations,
+            "adaptive_splits": self.adaptive_splits,
+            "candidates_decided_locally": self.candidates_decided_locally,
+            "candidates_needing_llm": self.candidates_needing_llm,
         }
 
 
@@ -131,6 +158,39 @@ def judgeable_criteria(parsed: ParsedSearchQuery) -> list:
         c for c in parsed.criteria
         if c.type in JUDGEABLE_CRITERION_TYPES and c.type not in CODE_AUTHORITATIVE_CRITERION_TYPES
     ]
+
+
+def needs_semantic_judge(prescored, crit) -> bool:
+    """True when resolving THIS criterion for THIS candidate could actually
+    change whether they end up Exact / Possible / Top-N (hardening PART 4/5 —
+    the staged decision function the mission asked to make testable).
+
+    Skip judging when:
+      * the criterion isn't required — a semantic UNKNOWN on a non-required
+        criterion never changes qualification, only a soft score contribution
+      * the criterion isn't judgeable, or is code-authoritative (career
+        transition / years experience are never judge-overridden)
+      * the deterministic prescore for THIS criterion already resolved it to
+        TRUE or FALSE — a validated judge verdict cannot do better than a
+        grounded fact/company-classification/semantic-assertion already did
+      * the candidate is ALREADY sealed NOT_MATCH by a DIFFERENT required
+        criterion — this one's own outcome cannot change that result, so
+        spending a call on it buys nothing (mission: "candidate could not
+        affect the displayed result")
+    """
+    if not crit.required:
+        return False
+    if crit.type not in JUDGEABLE_CRITERION_TYPES or crit.type in CODE_AUTHORITATIVE_CRITERION_TYPES:
+        return False
+    if prescored is None:
+        return True  # no prior signal — safest is to judge, never invented
+    if prescored.status_by_criterion.get(crit.id) != TriState.UNKNOWN:
+        return False
+    return prescored.qualification != Qualification.NOT_MATCH
+
+
+def candidate_needs_judge(prescored, jcrits: list) -> bool:
+    return any(needs_semantic_judge(prescored, c) for c in jcrits)
 
 
 def run_judge(
@@ -158,6 +218,21 @@ def run_judge(
         meta.judge_status = JudgeStatus.NOT_USED
         return JudgeRun({}, {}, meta)
 
+    # ── STAGE E/F (hardening PART 4) — drop candidates already fully decided
+    #    by stored facts / semantics. Applies in EVERY mode: "all_viable" means
+    #    every candidate with genuine unresolved required uncertainty, never
+    #    "everyone regardless of whether the judge could change anything." ──
+    total_before_local = len(bundle)
+    if local_scored is not None:
+        bundle = [(p, f, x) for (p, f, x) in bundle
+                 if candidate_needs_judge(local_scored.get(p.id), jcrits)]
+    meta.candidates_decided_locally = total_before_local - len(bundle)
+    meta.candidates_needing_llm = len(bundle)
+    meta.viable_candidate_count = len(bundle)
+    if not bundle:
+        meta.judge_status = JudgeStatus.NOT_USED
+        return JudgeRun({}, {}, meta)
+
     if mode == JudgeMode.UNCERTAIN_ONLY:
         bundle = _uncertain_shortlist(bundle, jcrits, local_scored)
         meta.viable_candidate_count = len(bundle)
@@ -181,7 +256,6 @@ def run_judge(
         size=settings.semantic_judge_batch_size,
         max_chars=settings.semantic_judge_max_batch_chars,
     )
-    meta.judge_batch_count = len(batches)
     meta.oversized_packets = len(oversized)
     if oversized:
         log.warning("judge: %d packet(s) too large for a batch — left unjudged: %s",
@@ -189,20 +263,26 @@ def run_judge(
 
     verdicts: dict[str, dict[str, dict]] = {}
     for batch in batches:
-        res = _judge_batch(payload, batch)
-        if res is None:
-            meta.judge_failed_batches += 1
-            continue
-        jb, provider, model = res
-        meta.judge_successful_batches += 1
-        meta.providers[provider] = meta.providers.get(provider, 0) + 1
-        if model and model not in meta.models:
-            meta.models.append(model)
-        for pv in jb.people:
-            verdicts[pv.person_id] = {
-                cv.criterion_id: {**cv.model_dump(), "overall_fit": pv.overall_fit}
-                for cv in pv.criteria
-            }
+        leaves, stats = run_adaptive(batch, lambda pkts: _call_judge(payload, pkts))
+        meta.judge_batch_count += stats.batches_attempted
+        meta.judge_successful_batches += stats.successful_batches
+        meta.judge_failed_batches += stats.failed_batches
+        meta.truncations += stats.truncations
+        meta.adaptive_splits += stats.adaptive_splits
+        for prov, n in stats.providers.items():
+            meta.providers[prov] = meta.providers.get(prov, 0) + n
+        for m in stats.models:
+            if m not in meta.models:
+                meta.models.append(m)
+        for leaf in leaves:
+            if leaf.outcome != "ok":
+                continue
+            jb = leaf.payload
+            for pv in jb.people:
+                verdicts[pv.person_id] = {
+                    cv.criterion_id: {**cv.model_dump(), "overall_fit": pv.overall_fit}
+                    for cv in pv.criteria
+                }
 
     _fill_missing(verdicts, packets_by_id, jcrits, meta)
 
@@ -258,9 +338,12 @@ def _make_batches(
     return batches, oversized
 
 
-def _judge_batch(payload: dict, packets: list[dict]) -> tuple[JudgeBatch, str, str] | None:
-    """One batched judge request through the router. Returns
-    ``(JudgeBatch, provider, model)`` or ``None`` when every provider failed."""
+def _call_judge(payload: dict, packets: list[dict]) -> tuple[str, object, str | None, str | None]:
+    """One batched judge request through the router — the ``CallFn`` the
+    adaptive splitter drives. Returns ``("ok", JudgeBatch, provider, model)``,
+    ``("truncated", None, None, None)`` (caller should split and retry the
+    halves), or ``("failed", None, None, None)`` (every provider genuinely
+    exhausted / non-truncation error)."""
     user = (
         "SEARCH PLAN (how to judge — never a phrase to match):\n"
         + json.dumps(payload, ensure_ascii=False, default=str)
@@ -276,11 +359,15 @@ def _judge_batch(payload: dict, packets: list[dict]) -> tuple[JudgeBatch, str, s
         _SYSTEM, user, JudgeBatch,
         max_tokens=min(4000, 400 + 320 * len(packets)),
         operation="semantic_judge",
+        return_meta=True,
     )
-    if result is None:
-        return None
-    jb, provider, model = result
-    return jb, provider, model
+    if result[0] is not None:
+        model, provider, model_id, meta = result
+        return "ok", model, provider, model_id
+    _, meta = result
+    if any(a.get("status") == "output_truncated" for a in meta.get("attempts", [])):
+        return "truncated", None, None, None
+    return "failed", None, None, None
 
 
 # ─────────────────────── completeness (§30) ───────────────────────
@@ -308,19 +395,16 @@ def _fill_missing(verdicts: dict, packets_by_id: dict, jcrits: list, meta: Judge
 
 
 def _uncertain_shortlist(bundle: list[tuple], jcrits: list, local_scored: dict | None) -> list[tuple]:
-    if not local_scored:
-        return bundle[: settings.semantic_judge_pool]
-    lo, hi = settings.semantic_judge_low, settings.semantic_judge_high
-    jids = {c.id for c in jcrits}
-    picked: list[tuple] = []
-    for person, facts, extras in bundle:
-        sc = local_scored.get(person.id)
-        if sc is None:
-            picked.append((person, facts, extras))
-            continue
-        if any(lo <= comp.match_strength <= hi for comp in sc.components if comp.criterion_id in jids):
-            picked.append((person, facts, extras))
-    return picked[: settings.semantic_judge_pool]
+    """The cheaper opt-in mode's pool cap. ``bundle`` has ALREADY been through
+    the same ``candidate_needs_judge`` staged filter as ``all_viable`` (V4
+    hardening PART 4/5) — this only trims that already-ambiguous set further
+    when it's larger than ``semantic_judge_pool``, prioritising by prescore.
+    (Previously used a raw match_strength ∈ [low,high] band, which silently
+    missed a required criterion sitting at strength 0.0 — a real UNKNOWN is
+    not always a "medium" number. The tri-state decision function is exact.)"""
+    if not local_scored or len(bundle) <= settings.semantic_judge_pool:
+        return bundle[: settings.semantic_judge_pool] if not local_scored else bundle
+    return _cap_prioritise(bundle, local_scored)[: settings.semantic_judge_pool]
 
 
 def _cap_prioritise(bundle: list[tuple], local_scored: dict | None) -> list[tuple]:

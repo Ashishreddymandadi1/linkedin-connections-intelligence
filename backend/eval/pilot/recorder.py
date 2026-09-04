@@ -224,8 +224,10 @@ def _offline():
     def _empty_chain():
         return []
 
-    def _exhausted(*a, **k):  # noqa: ARG001
-        return None
+    def _exhausted(*a, **k):
+        meta = {"operation": k.get("operation"), "selected_provider": None,
+               "selected_model": None, "attempts": [{"provider": None, "status": "offline"}]}
+        return (None, meta) if k.get("return_meta") else None
 
     saved_chain = _providers.default_chain
     saved_router_chain = _router.default_chain

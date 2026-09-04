@@ -14,6 +14,7 @@ from app.services.llm.base import (
     LLMAuthError,
     LLMBadOutput,
     LLMConfigError,
+    LLMOutputTruncated,
     LLMRateLimited,
     LLMTransport,
     LLMUnavailable,
@@ -79,6 +80,7 @@ def messages_json(
         raise LLMConfigError(f"anthropic error {resp.status_code}")
 
     body = resp.json()
+    stop_reason = body.get("stop_reason")
     try:
         text = "".join(
             block.get("text", "") for block in body.get("content", []) if block.get("type") == "text"
@@ -87,6 +89,21 @@ def messages_json(
         raise LLMBadOutput(f"unexpected Anthropic response shape: {e}") from e
 
     if not text.strip():
+        if stop_reason == "max_tokens":
+            raise LLMOutputTruncated(f"Anthropic returned no text and stopped at max_tokens={max_tokens}")
         raise LLMBadOutput("empty Anthropic response")
+
     # the assistant turn was prefilled with "{", so stitch it back on
-    return _extract_json("{" + text if not text.lstrip().startswith("{") else text)
+    full = "{" + text if not text.lstrip().startswith("{") else text
+    try:
+        return _extract_json(full)
+    except LLMBadOutput as e:
+        # a genuinely malformed response stays LLMBadOutput (retry-same-provider
+        # can still help); one that hit the token ceiling gets its own category
+        # so the caller SPLITS the batch instead of resubmitting the same request.
+        if stop_reason == "max_tokens":
+            raise LLMOutputTruncated(
+                f"Anthropic hit max_tokens={max_tokens} before completing valid JSON "
+                f"({len(full)} chars produced): {e}"
+            ) from e
+        raise

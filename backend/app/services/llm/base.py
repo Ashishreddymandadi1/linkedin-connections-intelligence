@@ -75,6 +75,18 @@ class LLMBadOutput(LLMError):
     retryable = True
 
 
+class LLMOutputTruncated(LLMBadOutput):
+    """The model stopped because it hit ``max_tokens`` before producing
+    complete JSON (Anthropic ``stop_reason == "max_tokens"`` / OpenAI-style
+    ``finish_reason == "length"``). Retrying the IDENTICAL request wastes a
+    call — it will truncate again. The caller (a batched judge/audit) should
+    SPLIT the request into smaller pieces instead of retrying as-is; the
+    router itself moves straight to the next provider rather than repeating
+    the same oversized request against this one."""
+
+    category = "output_truncated"
+
+
 @dataclass
 class LLMResult:
     data: dict

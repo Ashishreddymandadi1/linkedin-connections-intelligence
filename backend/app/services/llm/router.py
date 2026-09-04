@@ -16,12 +16,13 @@ from typing import TypeVar
 from pydantic import BaseModel, ValidationError
 
 from app.config import settings
-from app.services.llm import circuit
+from app.services.llm import budget, circuit
 from app.services.llm.base import (
     LLMAuthError,
     LLMBadOutput,
     LLMConfigError,
     LLMError,
+    LLMOutputTruncated,
     LLMProvider,
     LLMRateLimited,
     LLMUnavailable,
@@ -55,6 +56,13 @@ def generate_structured(
     is ``{"operation","selected_provider","selected_model","attempts":[...]}``
     (V4 §11). Returns ``None`` (or ``(None, meta)``) when every provider is
     exhausted."""
+    if not budget.try_consume():
+        log.warning("%s -> SEARCH_LLM_MAX_CALLS budget exhausted — skipping (deterministic result stands)",
+                   operation)
+        meta = {"operation": operation, "selected_provider": None, "selected_model": None,
+               "attempts": [{"provider": None, "status": "budget_exhausted"}]}
+        return (None, meta) if return_meta else None
+
     providers = chain if chain is not None else default_chain()
     retries = max(0, settings.llm_max_retries)
     full_user = user_prompt + _SCHEMA_HINT_PREFIX + _schema_skeleton(schema)
@@ -92,6 +100,14 @@ def generate_structured(
                 if attempt < retries:
                     _sleep(2 ** attempt)
                     continue
+            except LLMOutputTruncated as e:
+                # retrying the IDENTICAL request would just truncate again — go
+                # straight to the next provider; the caller (a batched judge/
+                # audit) is the one that can actually fix this, by splitting.
+                last_category = e.category
+                log.warning("%s -> %s output_truncated: %s (no identical retry — caller should split)",
+                           operation, provider.name, str(e)[:160])
+                break
             except (LLMBadOutput, ValidationError) as e:
                 last_category = "bad_output"
                 log.warning("%s -> %s bad_output: %s (try %d)", operation, provider.name, str(e)[:160], attempt + 1)
@@ -115,10 +131,11 @@ def generate_structured(
                 return model, provider.name, provider.model
             break  # retries for this provider exhausted -> next provider
 
-        # provider gave up — record for the breaker (bad_output is prompt-local,
-        # not a provider fault, so it does not trip the circuit)
+        # provider gave up — record for the breaker (bad_output / output_truncated
+        # are prompt- or request-size-local, not a provider fault, so neither
+        # trips the circuit)
         attempts.append({"provider": provider.name, "status": last_category})
-        if last_category != "bad_output":
+        if last_category not in ("bad_output", "output_truncated"):
             circuit.record_failure(provider.name, last_category)
 
     log.error("%s -> all LLM providers exhausted (%s)", operation, [a["status"] for a in attempts])
