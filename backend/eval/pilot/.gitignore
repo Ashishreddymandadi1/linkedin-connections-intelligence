@@ -1,0 +1,6 @@
+# Real-data pilot artifacts — never commit (contain LinkedIn profile data / names)
+pilot.db
+pilot.db-journal
+pilot.db-wal
+results/
+labels/
