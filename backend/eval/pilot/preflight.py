@@ -10,14 +10,16 @@ tiny prompt). No search, no semantic enrichment. Gated behind
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.config import settings
 
 
 class _Ping(BaseModel):
-    ok: bool = Field(description="always true")
-    word: str = Field(description="echo the single word 'pong'")
+    ok: Literal[True] = Field(description="must be true")
+    word: Literal["pong"] = Field(description="must be exactly 'pong'")
 
 
 def inspect() -> dict:

@@ -128,7 +128,12 @@ def generate_structured(
     return None
 
 
-_SCHEMA_HINT_PREFIX = "\n\nReturn ONLY a JSON object matching this schema (no prose, no markdown):\n"
+_SCHEMA_HINT_PREFIX = (
+    "\n\nReturn ONLY a JSON object matching this schema (no prose, no markdown).\n"
+    "IMPORTANT: the values shown below are PLACEHOLDERS that demonstrate the "
+    "required JSON structure only. DO NOT copy the placeholder values. "
+    "Populate every field from the task instructions and supplied data:\n"
+)
 
 
 def _schema_skeleton(schema: type[BaseModel]) -> str:
@@ -153,6 +158,8 @@ def _resolve(prop: dict, defs: dict) -> dict:
 
 def _example_for(prop: dict, defs: dict):
     prop = _resolve(prop, defs)
+    if "const" in prop:
+        return prop["const"]
     t = prop.get("type")
     if "anyOf" in prop and not t:
         for opt in prop["anyOf"]:
