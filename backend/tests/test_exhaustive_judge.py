@@ -490,6 +490,33 @@ def test_wrong_scope_evidence_downgrades_current_claim():
     assert any("not current" in n for n in out["role"]["validation"]["notes"])
 
 
+def test_was_mentored_does_not_prove_is_a_mentor():
+    """named correctness scenario (hardening PART 27): 'was mentored' / 'as a
+    mentee' describes RECEIVING mentorship, the opposite of a mentor-experience
+    criterion. Even a claimed TRUE with a grounded reference must be downgraded
+    when the judge's own reason text says the person was on the receiving end."""
+    raw = {"mentor": {"criterion_id": "mentor", "status": "true", "match_strength": 0.85,
+                      "supporting_evidence_refs": ["exp:e1"],
+                      "reason": "was mentored by a senior engineer early in her career"}}
+    crit = _crit(id="mentor", type=CriterionType.PROFESSIONAL_CONCEPT,
+                 concept="evidence of mentoring, coaching or advising others", required=True)
+    out = validate_person(raw, _packet(), ParsedSearchQuery(criteria=[crit]), _facts0(), ScoringContext())
+    assert out["mentor"]["status"] == TriState.UNKNOWN
+    assert any("receiving mentorship" in n for n in out["mentor"]["validation"]["notes"])
+
+
+def test_actually_mentoring_others_survives_validation():
+    """The contrast case: a grounded TRUE genuinely describing GIVING mentorship
+    must NOT be caught by the was-mentored guard."""
+    raw = {"mentor": {"criterion_id": "mentor", "status": "true", "match_strength": 0.85,
+                      "supporting_evidence_refs": ["exp:e1"],
+                      "reason": "mentored three junior engineers and led their onboarding"}}
+    crit = _crit(id="mentor", type=CriterionType.PROFESSIONAL_CONCEPT,
+                 concept="evidence of mentoring, coaching or advising others", required=True)
+    out = validate_person(raw, _packet(), ParsedSearchQuery(criteria=[crit]), _facts0(), ScoringContext())
+    assert out["mentor"]["status"] == TriState.TRUE
+
+
 def test_professor_from_education_only_is_downgraded():
     raw = {"prof": {"criterion_id": "prof", "status": "true", "match_strength": 0.8,
                     "supporting_evidence_refs": ["edu:ed1"], "reason": "studied at Stanford"}}

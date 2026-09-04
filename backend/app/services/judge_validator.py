@@ -42,12 +42,15 @@ _EMPLOYMENT_CONCEPT_RE = re.compile(
     r"position at|role at|on staff|staff (?:member|scientist)|payroll)\b", re.I,
 )
 _PASSIVE_MENTEE_RE = re.compile(
-    r"\b(was mentored|received mentor|being mentored|as a mentee|mentee of|"
-    r"participated in (?:a |the )?mentor|mentorship program|was coached|"
-    r"benefited from mentor)\b", re.I,
+    r"\b(was mentored|received mentor\w*|being mentored|as a mentee|mentee of|"
+    r"participated in (?:a |the )?mentor\w*|mentorship program|was coached|"
+    r"benefited from mentor\w*)\b", re.I,
 )
+#: \w* (not a trailing \b) so this matches inflections too — "mentoring",
+#: "mentors", "coaching", "advising", "advisor" — not just the bare stem.
 _MENTOR_CONCEPT_RE = re.compile(
-    r"\b(mentor|coach|advis|guiding others|develop(?:ing)? people|people management)\b", re.I,
+    r"\b(mentor\w*|coach\w*|advis\w*|guiding others|develop(?:ing)? people|people management)",
+    re.I,
 )
 _EDUCATION_CONCEPT_RE = re.compile(
     r"\b(degree|studied|alumni|alumnus|graduat|university education|college education)\b", re.I,
