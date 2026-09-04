@@ -293,7 +293,7 @@ def test_auditor_cannot_manufacture_exact():
 def _fake_audit(decisions_by_pid, *, capture=None, none_after=None):
     state = {"n": 0}
 
-    def fake(payload, packets, first_pass_by_id):
+    def fake(payload, packets, first_pass_by_id, parsed=None):
         idx = state["n"]
         state["n"] += 1
         if capture is not None:
@@ -305,14 +305,19 @@ def _fake_audit(decisions_by_pid, *, capture=None, none_after=None):
             pid = pkt["person_id"]
             d = decisions_by_pid.get(pid, "approved")
             cur_id = (pkt.get("current") or {}).get("experience_id") or "x"
-            people.append(FinalAuditPersonDecision(
-                person_id=pid, decision=d, confidence=0.9, reason="ok",
-                criteria=[FinalAuditCriterionReview(
-                    criterion_id=c["id"],
-                    status_review="unsupported" if d == "incorrect" else "supported", reason="r",
-                    contradicting_evidence_refs=([f"exp:{cur_id}"] if d == "incorrect" else []))
-                    for c in payload["criteria"] if c["required"]]))
-        return "ok", FinalAuditBatch(people=people), "mock:prov", "mock-1"
+            people.append({
+                "person_id": pid, "decision": d, "confidence": 0.9, "reason": "ok",
+                "criteria": [
+                    {"criterion_id": c["id"],
+                     "status_review": "unsupported" if d == "incorrect" else "supported", "reason": "r",
+                     "supporting_evidence_refs": [],
+                     "contradicting_evidence_refs": ([f"exp:{cur_id}"] if d == "incorrect" else [])}
+                    for c in payload["criteria"] if c["required"]
+                ],
+                "supporting_evidence_refs": [], "contradicting_evidence_refs": [],
+                "suggested_qualification": None,
+            })
+        return "ok", people, "mock:prov", "mock-1"
 
     return fake
 
@@ -452,15 +457,16 @@ def test_search_runs_audit_after_scoring_and_returns_metadata(client, monkeypatc
 
     seen_pids = []
 
-    def fake_audit(payload, packets, first_pass_by_id):
+    def fake_audit(payload, packets, first_pass_by_id, parsed=None):
         seen_pids.extend(p["person_id"] for p in packets)
-        people = [FinalAuditPersonDecision(person_id=p["person_id"], decision="approved",
-                                           confidence=0.88, reason="checks out",
-                                           criteria=[FinalAuditCriterionReview(
-                                               criterion_id=c["id"], status_review="supported")
-                                               for c in payload["criteria"] if c["required"]])
-                  for p in packets]
-        return "ok", FinalAuditBatch(people=people), "mock:prov", "mock-1"
+        people = [{
+            "person_id": p["person_id"], "decision": "approved", "confidence": 0.88, "reason": "checks out",
+            "criteria": [{"criterion_id": c["id"], "status_review": "supported", "reason": "",
+                         "supporting_evidence_refs": [], "contradicting_evidence_refs": []}
+                        for c in payload["criteria"] if c["required"]],
+            "supporting_evidence_refs": [], "contradicting_evidence_refs": [], "suggested_qualification": None,
+        } for p in packets]
+        return "ok", people, "mock:prov", "mock-1"
 
     monkeypatch.setattr(final_auditor, "_call_audit", fake_audit)
 

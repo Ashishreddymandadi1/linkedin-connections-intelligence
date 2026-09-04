@@ -28,10 +28,11 @@ from dataclasses import dataclass, field
 
 from app.config import settings
 from app.constants import AuditDecision, AuditStatus
-from app.schemas import FinalAuditBatch, ParsedSearchQuery
+from app.schemas import CompactAuditBatch, ParsedSearchQuery
 from app.services.judge_packet import build_packets
 from app.services.llm.adaptive_batch import run_adaptive
 from app.services.llm.router import generate_structured
+from app.services.llm.token_estimate import estimate_audit_output_tokens, plan_batch_size
 from app.services.semantic_judge import _make_batches
 
 log = logging.getLogger("app.audit")
@@ -75,7 +76,14 @@ _AUDIT_SYSTEM = (
     "You do NOT set the final qualification — the backend does, and it will NEVER promote "
     "possible -> exact from your review. Cite packet evidence references "
     "(exp:/edu:/cert:/skill:/assertion:/company:/pub:/vol:/rec:) for every objection and "
-    "approval. Review EACH required criterion in `criteria`. Return JSON only."
+    "approval. Review EACH required criterion in `criteria`.\n\n"
+    "OUTPUT IS TRANSPORT ONLY, not a report: no long prose, no restating the evidence. A short "
+    "phrase of a few words is enough ONLY when it clarifies a downgrade/incorrect call — omit it "
+    "otherwise. Return JSON only, in exactly this shape: "
+    '{"people":[{"person_id":"...","decision":"approved|downgrade|incorrect|unknown","confidence":0-1,'
+    '"criteria":[{"criterion_id":"...","status_review":"supported|unsupported|uncertain",'
+    '"supporting_refs":["exp:.."],"contradicting_refs":[],"reason":""}]}]} '
+    "— one entry per person_id, one review per REQUIRED criterion at minimum."
 )
 
 
@@ -158,9 +166,13 @@ def run_final_audit(
     first_pass_by_id = {c.person.id: _first_pass(c, ctx) for c in audit_pool}
     payload = _audit_payload(query, parsed)
 
+    # criteria density -> proactive batch size (hardening PART 4, mirrors the judge)
+    req_counts = [sum(1 for c in parsed.criteria if c.required) or 1 for _ in packets]
+    avg_criteria = (sum(req_counts) / len(req_counts)) if req_counts else 1.0
+    planned_size = plan_batch_size(settings.final_result_audit_batch_size, avg_criteria)
     batches, oversized = _make_batches(
         packets,
-        size=settings.final_result_audit_batch_size,
+        size=planned_size,
         max_chars=settings.final_result_audit_max_batch_chars,
     )
     meta.oversized_packets = len(oversized)
@@ -169,7 +181,7 @@ def run_final_audit(
 
     decisions: dict[str, dict] = {}
     for batch in batches:
-        leaves, stats = run_adaptive(batch, lambda pkts: _call_audit(payload, pkts, first_pass_by_id))
+        leaves, stats = run_adaptive(batch, lambda pkts: _call_audit(payload, pkts, first_pass_by_id, parsed))
         meta.batch_count += stats.batches_attempted
         meta.successful_batches += stats.successful_batches
         meta.failed_batches += stats.failed_batches
@@ -183,8 +195,8 @@ def run_final_audit(
         for leaf in leaves:
             if leaf.outcome != "ok":
                 continue
-            for pd in leaf.payload.people:
-                decisions[pd.person_id] = pd.model_dump()
+            for d in leaf.payload:
+                decisions[d["person_id"]] = d
 
     for c in audit_pool:
         if c.person.id not in decisions:
@@ -287,11 +299,45 @@ def _first_pass(cand, ctx) -> dict:
     }
 
 
-def _call_audit(payload: dict, packets: list[dict], first_pass_by_id: dict) -> tuple[str, object, str | None, str | None]:
+def _expand_compact_audit(pd) -> dict:
+    """CompactAuditPersonDecision -> the internal ``raw`` shape
+    final_audit_validator.validate_audit expects (hardening PART 11) — person-
+    level refs / suggested_qualification are simply absent now (never read
+    from a well-formed response anyway; validator defaults handle their
+    absence)."""
+    return {
+        "person_id": pd.person_id,
+        "decision": pd.decision,
+        "confidence": pd.confidence,
+        "reason": "",
+        "criteria": [
+            {
+                "criterion_id": cr.criterion_id, "status_review": cr.status_review,
+                "reason": cr.reason,
+                "supporting_evidence_refs": cr.supporting_refs,
+                "contradicting_evidence_refs": cr.contradicting_refs,
+            }
+            for cr in pd.criteria
+        ],
+        "supporting_evidence_refs": [], "contradicting_evidence_refs": [],
+        "suggested_qualification": None,
+    }
+
+
+def _call_audit(
+    payload: dict, packets: list[dict], first_pass_by_id: dict, parsed: ParsedSearchQuery | None = None,
+    *, _retry: bool = False,
+) -> tuple[str, object, str | None, str | None]:
     """One batched audit request through the router — the ``CallFn`` the
-    adaptive splitter drives (hardening PART 3, shared with the judge). Returns
-    ``("ok", FinalAuditBatch, provider, model)``, ``("truncated", None, None,
-    None)``, or ``("failed", None, None, None)``."""
+    adaptive splitter drives (hardening PART 3/11, shared with the judge).
+    Returns ``("ok", [raw_decision_dict, ...], provider, model)``,
+    ``("truncated", None, None, None)``, or ``("failed", None, None, None)``."""
+    required_n = sum(1 for c in (parsed.criteria if parsed else []) if c.required) or 1
+    max_tokens = estimate_audit_output_tokens(len(packets), required_n)
+    if _retry:
+        from app.services.llm.token_estimate import MAX_OUTPUT_TOKENS
+        max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
+
     people = [
         {"packet": pkt, "first_pass": first_pass_by_id.get(pkt["person_id"], {})}
         for pkt in packets
@@ -301,24 +347,20 @@ def _call_audit(payload: dict, packets: list[dict], first_pass_by_id: dict) -> t
         + json.dumps(payload, ensure_ascii=False, default=str)
         + "\n\nCANDIDATES (evidence packet + first-pass result):\n"
         + json.dumps(people, ensure_ascii=False, default=str)
-        + '\n\nReturn {"people":[{"person_id":"...","decision":"approved|downgrade|incorrect|unknown",'
-        '"confidence":0-1,"reason":"...","criteria":[{"criterion_id":"...",'
-        '"status_review":"supported|unsupported|uncertain","reason":"...",'
-        '"supporting_evidence_refs":["exp:.."],"contradicting_evidence_refs":[]}],'
-        '"supporting_evidence_refs":[],"contradicting_evidence_refs":[],'
-        '"suggested_qualification":null}]} — one entry per person_id, and one `criteria` review '
-        "per REQUIRED criterion at minimum."
     )
     result = generate_structured(
-        _AUDIT_SYSTEM, user, FinalAuditBatch,
-        max_tokens=min(4000, 500 + 360 * len(packets)),
-        operation="final_result_audit",
-        return_meta=True,
+        _AUDIT_SYSTEM, user, CompactAuditBatch,
+        max_tokens=max_tokens, operation="final_result_audit", return_meta=True,
     )
     if result[0] is not None:
-        fab, provider, model, _meta = result
-        return "ok", fab, provider, model
+        batch, provider, model, _meta = result
+        return "ok", [_expand_compact_audit(pd) for pd in batch.people], provider, model
+
     _, meta = result
-    if any(a.get("status") == "output_truncated" for a in meta.get("attempts", [])):
+    truncated = any(a.get("status") in ("output_truncated", "request_too_large")
+                    for a in meta.get("attempts", []))
+    if truncated and len(packets) == 1 and not _retry:
+        return _call_audit(payload, packets, first_pass_by_id, parsed, _retry=True)
+    if truncated:
         return "truncated", None, None, None
     return "failed", None, None, None

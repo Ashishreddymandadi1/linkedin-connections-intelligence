@@ -254,13 +254,14 @@ def test_audit_status_partial_when_required_reviews_are_omitted(monkeypatch):
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_batch_size", 10)
 
-    def fake(payload, packets, first_pass_by_id):
-        people = [FinalAuditPersonDecision(
-            person_id=pkt["person_id"], decision="approved", confidence=0.9, reason="ok",
-            criteria=[FinalAuditCriterionReview(criterion_id="a", status_review="supported",
-                                                supporting_evidence_refs=["exp:cur"])])
-            for pkt in packets]
-        return "ok", FinalAuditBatch(people=people), "mock", "m1"
+    def fake(payload, packets, first_pass_by_id, parsed=None):
+        people = [{
+            "person_id": pkt["person_id"], "decision": "approved", "confidence": 0.9, "reason": "ok",
+            "criteria": [{"criterion_id": "a", "status_review": "supported", "reason": "",
+                         "supporting_evidence_refs": ["exp:cur"], "contradicting_evidence_refs": []}],
+            "supporting_evidence_refs": [], "contradicting_evidence_refs": [], "suggested_qualification": None,
+        } for pkt in packets]
+        return "ok", people, "mock", "m1"
 
     monkeypatch.setattr(final_auditor, "_call_audit", fake)
 
@@ -299,10 +300,11 @@ def test_top_connections_is_the_only_result_count(client, monkeypatch):
     monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
     monkeypatch.setattr(semantic_judge, "_call_judge", lambda *a, **k: ("failed", None, None, None))
 
-    def fake_audit(payload, packets, first_pass_by_id):
-        people = [FinalAuditPersonDecision(person_id=p["person_id"], decision="approved", confidence=0.8,
-                                           reason="ok", criteria=[]) for p in packets]
-        return "ok", FinalAuditBatch(people=people), "mock", "m1"
+    def fake_audit(payload, packets, first_pass_by_id, parsed=None):
+        people = [{"person_id": p["person_id"], "decision": "approved", "confidence": 0.8,
+                  "reason": "ok", "criteria": [], "supporting_evidence_refs": [],
+                  "contradicting_evidence_refs": [], "suggested_qualification": None} for p in packets]
+        return "ok", people, "mock", "m1"
 
     monkeypatch.setattr(final_auditor, "_call_audit", fake_audit)
 
