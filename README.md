@@ -130,7 +130,9 @@ Because most candidates are already decided from stored facts and semantics, a
 only the genuinely ambiguous candidates reach the judge. An optional
 `SEARCH_LLM_MAX_CALLS` soft budget can cap query-time LLM spend further; if it's hit,
 deterministic results still stand and the UI marks verification as partial — it never
-silently pretends a review was complete.
+silently pretends a review was complete. `SEARCH_MAX_SECONDS` is the same idea for wall
+time: a very broad or difficult query stops starting new judge/audit batches once the
+deadline passes and returns partial-but-useful results instead of hanging.
 
 ## Cost
 
@@ -170,5 +172,6 @@ See `.env.example` for the full, commented list. Notable ones:
 
 `USE_FIXTURES` · `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_WORKSPACE_ID` ·
 `GROQ_API_KEY` / `OPENROUTER_API_KEY` (optional fallbacks) · `SEARCH_LLM_MAX_CALLS` ·
+`SEARCH_MAX_SECONDS` ·
 `SEMANTIC_JUDGE_MODE` · `FINAL_RESULT_AUDIT_ENABLED` · `TOP_CONNECTIONS` ·
 `CANDIDATE_POOL_SIZE` · `MIN_MATCH_SCORE` · `EMBEDDINGS_ENABLED` · `PROFILE_TTL_DAYS`.
