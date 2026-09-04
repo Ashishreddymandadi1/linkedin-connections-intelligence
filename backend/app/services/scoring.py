@@ -42,6 +42,7 @@ from app.services import career_chronology as _career
 from app.services.company_intel import company_key
 from app.services.geo import expand_values, location_matches
 from app.services.matching import (
+    category_field,
     company_matches,
     concept_overlap,
     experience_weight,
@@ -122,6 +123,10 @@ class ScoredCandidate:
     unmet_required: list[str] = field(default_factory=list)
     #: required semantic criteria that are UNKNOWN (why this is only POSSIBLE)
     uncertain_required: list[str] = field(default_factory=list)
+    #: criterion_id -> TriState, for every tri-state (semantic / structured-NOT)
+    #: criterion — lets the judge-triage decide, PER CRITERION, whether a call is
+    #: even worth spending (hardening PART 4/5: staged local resolution).
+    status_by_criterion: dict[str, str] = field(default_factory=dict)
 
 
 def load_facts(db: Session, person: Person, facts_cache: dict | None = None) -> ProfileFacts:
@@ -391,23 +396,6 @@ def _career_snippet(facts: ProfileFacts) -> str:
     return "  ".join(b for b in bits if b.strip())[:1500]
 
 
-_CATEGORY_FIELD = {
-    "startup": "is_startup", "early stage": "is_startup", "early-stage": "is_startup",
-    "big tech": "is_big_tech", "big technology": "is_big_tech", "faang": "is_big_tech",
-    "major technology": "is_big_tech", "large tech": "is_big_tech",
-    "tech": "is_technology_company", "technology": "is_technology_company",
-    "software": "is_technology_company", "tech company": "is_technology_company",
-}
-
-
-def _category_field(concept: str) -> str | None:
-    c = norm(concept)
-    for key, fld in sorted(_CATEGORY_FIELD.items(), key=lambda kv: -len(kv[0])):
-        if key in c:
-            return fld
-    return None
-
-
 def _score_company_category(
     facts: ProfileFacts, crit: SearchCriterion, ctx: ScoringContext
 ) -> tuple[float, list[EvidenceItem], str]:
@@ -415,7 +403,7 @@ def _score_company_category(
     below ``company_category_confidence_min`` is treated as UNKNOWN, so a
     low-confidence TRUE cannot create an EXACT_MATCH."""
     concept = (crit.concept or crit.value or "").strip()
-    field_name = _category_field(concept)
+    field_name = category_field(concept)
     scope = crit.scope or Scope.CURRENT_COMPANY  # "startup" defaults to "now at a startup"
     scoped = _experiences_in_scope(facts.experiences, scope)
     cmin = settings.company_category_confidence_min
@@ -644,7 +632,7 @@ def _score_chronology(
     from app.services.career_chronology import score_transition, score_years_experience
 
     if crit.type == CriterionType.CAREER_TRANSITION:
-        return score_transition(facts, crit)
+        return score_transition(facts, crit, ctx)
     return score_years_experience(facts, crit)
 
 
@@ -865,9 +853,12 @@ def score_candidate(
 
     unmet: list[str] = []          # required + confidently FALSE / below the fact bar
     uncertain: list[str] = []      # required semantic + UNKNOWN
+    status_by_criterion: dict[str, str] = {}
 
     for crit in parsed.criteria:
         strength, ev, status = _score_one(facts, crit, ctx)
+        if status is not None:
+            status_by_criterion[crit.id] = status
         eff_weight = crit.weight * scale
         score = round(eff_weight * strength, 2)
         components.append(ScoreComponent(
@@ -911,6 +902,7 @@ def score_candidate(
             evidence=[], matched_criteria=matched,
             excluded_reason=f"required criterion not met: {unmet[0]}",
             qualification=qualification, unmet_required=unmet, uncertain_required=uncertain,
+            status_by_criterion=status_by_criterion,
         )
 
     if rel_w > 0:
@@ -924,6 +916,7 @@ def score_candidate(
         person=facts.person, match_score=round(min(100.0, total), 1), components=components,
         evidence=_dedupe_evidence(all_evidence), matched_criteria=matched,
         qualification=qualification, uncertain_required=uncertain,
+        status_by_criterion=status_by_criterion,
     )
 
 
