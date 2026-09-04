@@ -15,7 +15,8 @@ import pytest
 
 from app.config import settings
 from app.constants import CriterionType, Modality, Operator, QueryIntent
-from app.services.query_interpreter import interpret_query
+from app.schemas import ParsedSearchQuery, SearchCriterion
+from app.services.query_interpreter import _dedupe_semantic_duplicates, interpret_query
 
 
 def _plan(q):
@@ -168,6 +169,46 @@ def test_cross_domain_becomes_two_required_dimensions(query, a, b):
     assert len(required_dims) >= 2, f"{query}: expected 2 required dims, got {[c.concept for c in sem]}"
     assert not any(c.operator == Operator.ANY_OF and len(c.values) >= 2 for c in required_dims)
     assert not _has_keyword_fallback(plan)
+
+
+def test_llm_shaped_semantic_duplicates_collapse_to_two_required_dims():
+    """hardening PART 8 — the exact live failure: the LLM path (not the
+    deterministic parser) returned 4 criteria for "research plus industry
+    experience" because "research" was asked about under two types and
+    "industry" under two types. This directly exercises the post-processing
+    dedup against that hand-built shape, independent of how either parser
+    produces criteria — it must collapse to exactly the 2 real dimensions
+    without inventing/dropping the query's intent, and never touch a
+    genuinely different cross-domain AND (cybersecurity/healthcare)."""
+    plan = ParsedSearchQuery(criteria=[
+        SearchCriterion(id="research_pc", type=CriterionType.PROFESSIONAL_CONCEPT,
+                        concept="research experience", scope="career", weight=25, required=True),
+        SearchCriterion(id="research_rf", type=CriterionType.ROLE_FUNCTION,
+                        concept="research", scope="career", weight=25, required=True),
+        SearchCriterion(id="industry_ie", type=CriterionType.INDUSTRY_EXPERIENCE,
+                        concept="industry experience", scope="career", weight=25, required=True),
+        SearchCriterion(id="industry_sc", type=CriterionType.SEMANTIC_CONCEPT,
+                        concept="industry", scope="career", weight=25, required=False),
+    ])
+    _dedupe_semantic_duplicates(plan)
+    assert len(plan.criteria) == 2
+    concepts = {(c.concept or "").lower() for c in plan.criteria}
+    assert any("research" in c for c in concepts)
+    assert any("industry" in c for c in concepts)
+    # the generic semantic_concept duplicate's required=False must not weaken
+    # the surviving industry_experience criterion — OR semantics, not AND
+    assert all(c.required for c in plan.criteria)
+    assert sum(c.weight for c in plan.criteria) == 100
+
+    # a real cross-domain AND is untouched — near-zero concept overlap
+    cross = ParsedSearchQuery(criteria=[
+        SearchCriterion(id="cyber", type=CriterionType.PROFESSIONAL_CONCEPT,
+                        concept="cybersecurity experience", scope="career", weight=50, required=True),
+        SearchCriterion(id="health", type=CriterionType.INDUSTRY_EXPERIENCE,
+                        concept="healthcare industry experience", scope="career", weight=50, required=True),
+    ])
+    _dedupe_semantic_duplicates(cross)
+    assert len(cross.criteria) == 2
 
 
 def test_role_noun_form_stays_one_all_of_criterion():

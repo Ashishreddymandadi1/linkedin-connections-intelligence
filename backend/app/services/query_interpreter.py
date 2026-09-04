@@ -25,7 +25,7 @@ from app.config import settings
 from app.constants import CriterionType, Operator, Scope
 from app.schemas import ParsedSearchQuery, SearchCriterion
 from app.services.llm.router import generate_structured
-from app.services.matching import seniority_rank
+from app.services.matching import concept_overlap, seniority_rank
 from app.services.query_facts import (
     build_summary,
     extract_facts,
@@ -294,11 +294,75 @@ def _promote_subject(parsed: ParsedSearchQuery, query: str) -> None:
                 return
 
 
+#: types the judge/audit evaluate as MEANING, not a literal profile field (mirrors
+#: scoring._SEMANTIC_TYPES minus the code-authoritative career_transition /
+#: years_experience, which are never semantic duplicates of anything else).
+_MEANING_TYPES = {
+    CriterionType.SEMANTIC_CONCEPT, CriterionType.COMPANY_CATEGORY,
+    CriterionType.PROFESSIONAL_CONCEPT, CriterionType.INDUSTRY_EXPERIENCE,
+    CriterionType.ROLE_FUNCTION,
+}
+#: the generic catch-all type — dropped first when it overlaps a more specific one
+_GENERIC_MEANING_TYPE = CriterionType.SEMANTIC_CONCEPT
+#: concept_overlap() >= this is treated as "the same underlying meaning" (1.0 for
+#: substring containment, else Jaccard token overlap)
+_DUPLICATE_OVERLAP_MIN = 0.6
+
+
+def _concept_text(c: SearchCriterion) -> str:
+    return c.concept or c.value or " ".join(c.values or [])
+
+
+def _pick_primary(a: SearchCriterion, b: SearchCriterion) -> SearchCriterion:
+    """Which of two duplicate criteria survives — prefer a specific type (e.g.
+    professional_concept, industry_experience) over the generic semantic_concept
+    catch-all, then the larger weight, tie-broken by insertion order (``a``)."""
+    if a.type == _GENERIC_MEANING_TYPE and b.type != _GENERIC_MEANING_TYPE:
+        return b
+    if b.type == _GENERIC_MEANING_TYPE and a.type != _GENERIC_MEANING_TYPE:
+        return a
+    return a if a.weight >= b.weight else b
+
+
+def _dedupe_semantic_duplicates(parsed: ParsedSearchQuery) -> None:
+    """Collapse two criteria that judge the SAME underlying meaning (V4
+    hardening PART 8) — e.g. a "research experience" professional_concept and a
+    "research" role_function for the same query are one requirement asked
+    twice, not two. This doubles judge/audit load for nothing and can silently
+    over-tighten an AND query. Detected GENERICALLY by concept-text overlap
+    within the same type-family + scope — never by hardcoded query words. A
+    real cross-domain AND ("cybersecurity AND healthcare") has near-zero
+    concept-text overlap and is untouched, preserving legitimate multi-criteria
+    requirements."""
+    kept: list[SearchCriterion] = []
+    for c in parsed.criteria:
+        if c.type not in _MEANING_TYPES:
+            kept.append(c)
+            continue
+        dup_idx = next(
+            (i for i, k in enumerate(kept)
+             if k.type in _MEANING_TYPES and k.scope == c.scope
+             and concept_overlap(_concept_text(k), _concept_text(c)) >= _DUPLICATE_OVERLAP_MIN),
+            None,
+        )
+        if dup_idx is None:
+            kept.append(c)
+            continue
+        dup = kept[dup_idx]
+        primary = _pick_primary(dup, c)
+        primary.required = dup.required or c.required
+        primary.modality = dup.modality if dup.required else (c.modality if c.required else primary.modality)
+        primary.weight = round(dup.weight + c.weight, 2)
+        kept[dup_idx] = primary
+    parsed.criteria[:] = kept
+
+
 def _finalize(parsed: ParsedSearchQuery, query: str, issues: list[str]) -> None:
     # V4 PART 2 — universal representation: intent, relational context,
     # cross-domain / modality / academia / mentor shape, fallback cleanup.
     augment_plan(parsed, query)
     _promote_subject(parsed, query)
+    _dedupe_semantic_duplicates(parsed)
     if parsed.unresolved:
         # "my field" with no configured profile, etc. — never guessed, and it
         # must not read as a confident interpretation (V4 PART 2 §3/§9).
