@@ -228,9 +228,11 @@ def run_final_audit(
     else:
         meta.status = AuditStatus.FULL
 
-    log.info("final audit: pool=%d audited=%d %d/%d batches ok status=%s",
+    log.info("final audit: pool=%d audited=%d %d/%d batches ok truncations=%d splits=%d "
+             "deadline_reached=%s status=%s",
              meta.requested_candidates, meta.audited_candidates,
-             meta.successful_batches, meta.batch_count, meta.status)
+             meta.successful_batches, meta.batch_count, meta.truncations, meta.adaptive_splits,
+             meta.deadline_reached, meta.status)
     return AuditRun(decisions, packets_by_id, meta)
 
 

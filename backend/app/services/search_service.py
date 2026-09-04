@@ -273,6 +273,13 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     llm_calls["deadline"] = deadline.as_dict()
     llm_budget.clear_budget()
 
+    log.info(
+        "search %r done: llm_calls=%d elapsed_ms=%d deadline_s=%s deadline_reached=%s "
+        "judge_status=%s audit_status=%s",
+        query, llm_calls["total"], deadline.elapsed_ms(), deadline.seconds, deadline.expired(),
+        judge_metadata.get("status"), (audit_metadata or {}).get("status"),
+    )
+
     # FINAL validated search-level snapshot (V4 PART 7 §3) — captured here, AFTER
     # _run_final_audit -> final_auditor.finalize(). load_search rebuilds the whole
     # response from this row + the persisted result payloads, never re-running any
