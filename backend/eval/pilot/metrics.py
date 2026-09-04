@@ -26,6 +26,7 @@ class QueryMetrics:
     possible_precision: float | None = None
     audit_correction_rate: float | None = None
     audit_false_removal_rate: float | None = None
+    audit_grading: dict | None = None
     note: str = ""
 
     def as_dict(self) -> dict:
@@ -43,10 +44,65 @@ class QueryMetrics:
             "possible_precision": self.possible_precision,
             "audit_correction_rate": self.audit_correction_rate,
             "audit_false_removal_rate": self.audit_false_removal_rate,
+            "audit_grading": self.audit_grading,
         })
         if self.note:
             d["note"] = self.note
         return d
+
+
+# ─────────────────── audit-change grading (V4 PART 10.1 §2/§3) ───────────────────
+#
+# An audit change is graded ONLY when the affected person is labeled.
+#   removed  (final == not_match): correct if person in must_not_match;
+#                                  false removal if person in must_match;
+#                                  should_match-only removals are recorded as
+#                                  "questionable" and NOT counted as correct/incorrect.
+#   exact->possible downgrade:     correct if person in must_not_match;
+#                                  over-conservative (incorrect) if in must_match;
+#                                  should_match-only downgrades are "questionable".
+#   unlabeled person:              not graded.
+
+
+def grade_audit_transitions(transitions: list[dict], labels: QueryLabels | None) -> dict:
+    graded: list[dict] = []
+    questionable: list[dict] = []
+    ungraded = 0
+    if labels is None or not labels.any_labeled:
+        return {"policy": "no labels — audit changes not graded",
+                "graded": [], "questionable": [], "ungraded": len(transitions)}
+
+    for t in transitions:
+        bucket = t.get("bucket", "")
+        if bucket in ("exact_to_exact", "possible_to_possible"):
+            continue  # not a change
+        pid = t.get("person_id")
+        removed = bucket.endswith("_to_removed")
+        entry = {"person_id": pid, "bucket": bucket, "decision": t.get("audit_decision"),
+                 "reason": t.get("reason")}
+        if pid in labels.must_not_match:
+            entry["correct"] = True
+            graded.append(entry)
+        elif pid in labels.must_match:
+            entry["correct"] = False
+            entry["kind"] = "false_removal" if removed else "over_conservative_downgrade"
+            graded.append(entry)
+        elif pid in labels.should_match:
+            entry["policy"] = "should_match only — questionable, not graded correct/incorrect"
+            questionable.append(entry)
+        else:
+            ungraded += 1
+
+    removals = [g for g in graded if g["bucket"].endswith("_to_removed")]
+    return {
+        "policy": "graded via must_match / must_not_match; should_match-only changes are "
+                  "'questionable' and not scored; unlabeled changes are not graded",
+        "graded": graded,
+        "questionable": questionable,
+        "ungraded": ungraded,
+        "correction_rate": (sum(1 for g in graded if g["correct"]) / len(graded)) if graded else None,
+        "false_removal_rate": (sum(1 for g in removals if not g["correct"]) / len(removals)) if removals else None,
+    }
 
 
 def _relevant(labels: QueryLabels) -> set[str]:
@@ -64,12 +120,13 @@ def compute(
     labels: QueryLabels | None,
     qualifications: dict[str, str] | None = None,
     required_violations: dict[str, bool] | None = None,
-    audit_changes: list[dict] | None = None,
+    audit_transitions: list[dict] | None = None,
 ) -> QueryMetrics:
     """``ranked_person_ids`` — main results in rank order (exact+possible).
     ``qualifications`` — person_id -> "exact_match" | "possible_match".
     ``required_violations`` — person_id -> True when a required criterion is unmet/uncertain.
-    ``audit_changes`` — [{person_id, transition, correct?}] once labels exist.
+    ``audit_transitions`` — recorder's per-person first_pass->final transitions;
+      graded against labels (never assumed correct just because the audit acted).
     """
     if labels is None or not labels.any_labeled:
         return QueryMetrics(query_id=query_id, labeled=False)
@@ -113,14 +170,7 @@ def compute(
         if poss_ids:
             possible_p = sum(1 for pid in poss_ids if pid in rel and pid not in bad) / len(poss_ids)
 
-    corr_rate = false_removal_rate = None
-    if audit_changes:
-        graded = [c for c in audit_changes if "correct" in c]
-        if graded:
-            corr_rate = sum(1 for c in graded if c["correct"]) / len(graded)
-        removals = [c for c in audit_changes if c.get("transition", "").endswith("removed") and "correct" in c]
-        if removals:
-            false_removal_rate = sum(1 for c in removals if not c["correct"]) / len(removals)
+    audit_grading = grade_audit_transitions(audit_transitions or [], labels)
 
     return QueryMetrics(
         query_id=query_id,
@@ -132,6 +182,7 @@ def compute(
         required_violation_rate=violation_rate,
         exact_precision=exact_p,
         possible_precision=possible_p,
-        audit_correction_rate=corr_rate,
-        audit_false_removal_rate=false_removal_rate,
+        audit_correction_rate=audit_grading.get("correction_rate"),
+        audit_false_removal_rate=audit_grading.get("false_removal_rate"),
+        audit_grading=audit_grading,
     )

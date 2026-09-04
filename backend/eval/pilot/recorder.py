@@ -1,41 +1,68 @@
 """Run the evaluation queries through the REAL search pipeline and capture detail.
 
 ``run_query`` calls ``run_connection_search`` unchanged, against a Session bound
-to the isolated pilot DB. Judge verdicts and validator downgrades are captured by
-wrapping (monkeypatching) the two seams the search service imports — production
-code is not modified.
+to the isolated pilot DB. Judge verdicts, validator downgrades and final-audit
+before→after transitions are captured by wrapping (monkeypatching) the seams the
+search service uses — production code is NOT modified.
 
 ``offline=True`` forces every LLM provider to report "exhausted" so the run is
 deterministic and free: query interpretation falls back to the deterministic
 parser, the semantic judge and final audit report ``unavailable`` / ``not_used``.
+
+``reasons_enabled=False`` disables LLM display-reason generation for the duration
+of the run only (restored afterward) — it does not affect ranking (V4 PART 10.1 §8).
 """
 from __future__ import annotations
 
 import contextlib
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+# criterion types the deterministic UNKNOWN-rate heuristic treats as semantic
 JUDGEABLE_TYPES = (
-    "professional_concept", "role_function", "industry_experience",
+    "professional_concept", "semantic_concept", "role_function", "industry_experience",
     "company_category", "skill", "seniority", "career_transition",
 )
+
+_DROPPED_RE = re.compile(r"dropped (\d+) invalid evidence ref")
+_SCOPE_NOTE_RE = re.compile(r"cannot prove a .*-scoped claim|supporting experience is (?:not current|not past)")
 
 
 @dataclass
 class JudgeTrace:
     verdict_status_by_type: dict[str, dict[str, int]] = field(default_factory=dict)
-    validator_downgrades: int = 0
-    validator_dropped: int = 0
-    invalid_evidence_refs: int = 0
+    validator_downgrades: int = 0          # TRUE/FALSE -> UNKNOWN (any reason)
+    validator_dropped: int = 0             # whole verdicts removed (unknown criterion id etc.)
+    grounding_downgrades: int = 0          # TRUE/FALSE -> UNKNOWN specifically for failed grounding
+    invalid_evidence_refs: int = 0         # count of invented refs the validator stripped
+    wrong_scope_refs: int = 0              # verdicts whose refs were the wrong current/past scope
     people_judged: int = 0
-    missing_criterion_verdicts: int = 0
+    missing_criterion_verdicts: int = 0    # judgeable criteria the model omitted (per person, summed)
+    judgeable_criteria_expected: int = 0   # judgeable criteria * people judged
+    # direct judge signal for REQUIRED semantic criteria (V4 PART 10.1 §6)
+    required_semantic_total: int = 0
+    required_semantic_true: int = 0
+    required_semantic_false: int = 0
+    required_semantic_unknown: int = 0
 
     def _bump(self, ctype: str, status: str) -> None:
         d = self.verdict_status_by_type.setdefault(ctype, {"true": 0, "false": 0, "unknown": 0})
         d[status] = d.get(status, 0) + 1
+
+    @property
+    def required_semantic_unknown_rate(self) -> float | None:
+        if not self.required_semantic_total:
+            return None
+        return round(self.required_semantic_unknown / self.required_semantic_total, 4)
+
+    def as_dict(self) -> dict:
+        d = {k: v for k, v in self.__dict__.items()}
+        d["required_semantic_unknown_rate"] = self.required_semantic_unknown_rate
+        return d
 
 
 @dataclass
@@ -50,8 +77,12 @@ class QueryRecord:
     judge_metadata: dict | None
     audit_metadata: dict | None
     judge_trace: dict
-    audit_changes: list[dict]
-    unknown_required_rate: float | None
+    audit_transitions: list[dict]          # per person: first_pass -> final, decision, reason, issues
+    audit_transition_tally: dict[str, int]
+    audit_changes: list[dict]              # non-approved transitions only (kept for back-compat)
+    final_uncertainty_rate: float | None   # from final uncertain_criteria (renamed, key kept below)
+    unknown_required_rate: float | None    # alias of final_uncertainty_rate for older readers
+    reason_generation_enabled: bool
     llm_provider: str | None
     llm_model: str | None
 
@@ -59,60 +90,133 @@ class QueryRecord:
         return self.__dict__.copy()
 
 
+_AUDIT_REMOVED = "not_match"
+_TRANSITION_BUCKETS = (
+    "exact_to_exact", "exact_to_possible", "exact_to_removed",
+    "possible_to_possible", "possible_to_removed", "other",
+)
+
+
+def _transition_bucket(first: str, final: str) -> str:
+    f = "exact" if first == "exact_match" else "possible" if first == "possible_match" else "other"
+    if final == _AUDIT_REMOVED:
+        t = "removed"
+    elif final == "exact_match":
+        t = "exact"
+    elif final == "possible_match":
+        t = "possible"
+    else:
+        t = "other"
+    key = f"{f}_to_{t}"
+    return key if key in _TRANSITION_BUCKETS else "other"
+
+
 @contextlib.contextmanager
-def _instrument(trace: JudgeTrace):
+def _instrument(trace: JudgeTrace, audit_sink: list[dict]):
+    """Wrap the judge, judge-validator and final-audit-validator seams."""
+    from app.services import final_audit_validator as fav
     from app.services import search_service as ss
+    from app.services.semantic_judge import judgeable_criteria
 
     real_run_judge = ss.run_judge
     real_validate = ss.validate_person
+    real_validate_audit = fav.validate_audit
 
     def wrapped_run_judge(query, parsed, bundle, ctx, **kw):
         run = real_run_judge(query, parsed, bundle, ctx, **kw)
         ctype = {c.id: c.type for c in parsed.criteria}
+        expected = {c.id for c in judgeable_criteria(parsed)}
         trace.people_judged = len(run.verdicts)
+        trace.judgeable_criteria_expected = len(expected) * len(run.verdicts)
         for _pid, crits in run.verdicts.items():
             for cid, raw in crits.items():
-                t = ctype.get(cid, "unknown_type")
                 status = str(raw.get("status", "unknown")).lower()
                 if status not in ("true", "false", "unknown"):
                     status = "unknown"
-                trace._bump(t, status)
-                if not raw.get("supporting_evidence_refs") and not raw.get("contradicting_evidence_refs") \
-                        and status in ("true", "false"):
-                    trace.invalid_evidence_refs += 0  # refs presence checked in validator; placeholder
+                trace._bump(ctype.get(cid, "unknown_type"), status)
+                if raw.get("judge_missing") and cid in expected:
+                    trace.missing_criterion_verdicts += 1
         return run
 
     def wrapped_validate(person_verdicts, packet, parsed, facts, ctx):
         before = {cid: str(v.get("status", "unknown")).lower() for cid, v in person_verdicts.items()}
         out = real_validate(person_verdicts, packet, parsed, facts, ctx)
+
+        required_ids = {c.id for c in parsed.criteria if c.required}
+        judgeable_ids = {c.id for c in _judgeable(parsed)}
+
         for cid, bstatus in before.items():
             if cid not in out:
                 trace.validator_dropped += 1
                 continue
-            astatus = str(out[cid].get("status", "unknown")).lower()
+            v = out[cid]
+            astatus = str(v.get("status", "unknown")).lower()
+            notes = " ".join((v.get("validation") or {}).get("notes", []))
+            m = _DROPPED_RE.search(notes)
+            if m:
+                trace.invalid_evidence_refs += int(m.group(1))
+            if _SCOPE_NOTE_RE.search(notes):
+                trace.wrong_scope_refs += 1
             if bstatus in ("true", "false") and astatus == "unknown":
                 trace.validator_downgrades += 1
+                if "grounded" in notes or "grounding" in notes or "not FALSE" in notes:
+                    trace.grounding_downgrades += 1
+
+        for cid, v in out.items():
+            if cid in required_ids and cid in judgeable_ids:
+                st = str(v.get("status", "unknown")).lower()
+                trace.required_semantic_total += 1
+                if st == "true":
+                    trace.required_semantic_true += 1
+                elif st == "false":
+                    trace.required_semantic_false += 1
+                else:
+                    trace.required_semantic_unknown += 1
         return out
+
+    def wrapped_validate_audit(raw, packet, parsed, facts, ctx, *, first_pass_qualification,
+                               first_pass_uncertain=None):
+        v = real_validate_audit(raw, packet, parsed, facts, ctx,
+                                first_pass_qualification=first_pass_qualification,
+                                first_pass_uncertain=first_pass_uncertain)
+        final_q = v.get("applied_qualification")
+        first_q = v.get("first_pass_qualification", first_pass_qualification)
+        notes = " ".join((v.get("validation") or {}).get("notes", []))
+        m = _DROPPED_RE.search(notes)
+        if m:
+            trace.invalid_evidence_refs += int(m.group(1))
+        audit_sink.append({
+            "person_id": v.get("person_id") or raw.get("person_id"),
+            "first_pass_qualification": first_q,
+            "final_qualification": final_q,
+            "audit_decision": v.get("decision"),
+            "reason": (v.get("reason") or "")[:300],
+            "issues": v.get("audit_issues", []),
+            "failed_required": v.get("failed_required", []),
+            "missing_required_reviews": v.get("missing_required_reviews", 0),
+            "bucket": _transition_bucket(first_q or "", final_q or ""),
+        })
+        return v
 
     ss.run_judge = wrapped_run_judge
     ss.validate_person = wrapped_validate
+    fav.validate_audit = wrapped_validate_audit
     try:
         yield
     finally:
         ss.run_judge = real_run_judge
         ss.validate_person = real_validate
+        fav.validate_audit = real_validate_audit
+
+
+def _judgeable(parsed):
+    from app.services.semantic_judge import judgeable_criteria
+    return judgeable_criteria(parsed)
 
 
 @contextlib.contextmanager
 def _offline():
-    """Hard-guarantee zero network LLM calls.
-
-    Three independent locks:
-      1. empty the provider chain at its source (``providers.default_chain``)
-      2. blank the API keys in ``settings`` (so any stray chain build is empty too)
-      3. replace ``generate_structured`` on the router AND on every module that
-         imported the name directly, with a function that returns "exhausted".
-    """
+    """Hard-guarantee zero network LLM calls (three independent locks)."""
     from app.config import settings
     from app.services.llm import providers as _providers
     from app.services.llm import router as _router
@@ -132,18 +236,13 @@ def _offline():
     settings.anthropic_api_key = ""
     settings.groq_api_key = ""
     settings.openrouter_api_key = ""
-    # the final audit is an LLM path — meaningless offline; disable so its
-    # "not audited -> UNKNOWN" downgrades don't pollute the dry-run report.
     settings.final_result_audit_enabled = False
 
     patched: list[tuple] = []
     for modname in (
-        "app.services.llm.router",
-        "app.services.query_interpreter",
-        "app.services.semantic_judge",
-        "app.services.semantic_llm",
-        "app.services.reason_generator",
-        "app.services.final_auditor",
+        "app.services.llm.router", "app.services.query_interpreter",
+        "app.services.semantic_judge", "app.services.semantic_llm",
+        "app.services.reason_generator", "app.services.final_auditor",
     ):
         mod = sys.modules.get(modname)
         if mod is not None and hasattr(mod, "generate_structured"):
@@ -160,16 +259,27 @@ def _offline():
             mod.generate_structured = fn
 
 
+@contextlib.contextmanager
+def _reasons(enabled: bool):
+    from app.config import settings
+
+    if enabled:
+        yield
+        return
+    saved = settings.llm_reason_generation
+    settings.llm_reason_generation = False
+    try:
+        yield
+    finally:
+        settings.llm_reason_generation = saved
+
+
 def _funnel_from_judge(md: dict | None) -> dict:
     md = md or {}
-    return {
-        "network_size": md.get("network_size"),
-        "candidate_pool_size": md.get("candidate_pool_size"),
-        "hard_fact_rejected_count": md.get("hard_fact_rejected_count"),
-        "viable_candidate_count": md.get("viable_candidate_count"),
-        "judge_candidate_count": md.get("judge_candidate_count"),
-        "judge_batch_count": md.get("judge_batch_count"),
-    }
+    return {k: md.get(k) for k in (
+        "network_size", "candidate_pool_size", "hard_fact_rejected_count",
+        "viable_candidate_count", "judge_candidate_count", "judge_batch_count",
+    )}
 
 
 def _result_row(item: dict) -> dict:
@@ -194,7 +304,7 @@ def _result_row(item: dict) -> dict:
     }
 
 
-def _unknown_required_rate(interp: dict, results: list[dict]) -> float | None:
+def _final_uncertainty_rate(interp: dict, results: list[dict]) -> float | None:
     req_semantic = [
         c for c in interp.get("criteria", [])
         if c.get("required") and c.get("type") in JUDGEABLE_TYPES
@@ -206,21 +316,20 @@ def _unknown_required_rate(interp: dict, results: list[dict]) -> float | None:
     return round(min(1.0, unknown / total), 4) if total else None
 
 
-def run_query(db: Session, qdef: dict, *, offline: bool = True) -> QueryRecord:
+def run_query(db: Session, qdef: dict, *, offline: bool = True, reasons_enabled: bool = True) -> QueryRecord:
+    from app.models import Dataset
     from app.services.search_service import run_connection_search
 
-    # the pilot DB has exactly one dataset
-    from app.models import Dataset
     dataset_id = db.query(Dataset.id).scalar()
 
     trace = JudgeTrace()
-    stack = [_instrument(trace)]
-    if offline:
-        stack.append(_offline())
+    audit_transitions: list[dict] = []
 
     with contextlib.ExitStack() as es:
-        for cm in stack:
-            es.enter_context(cm)
+        es.enter_context(_instrument(trace, audit_transitions))
+        es.enter_context(_reasons(reasons_enabled))
+        if offline:
+            es.enter_context(_offline())
         resp = run_connection_search(db, dataset_id=dataset_id, query=qdef["query"])
         db.rollback()  # never persist eval searches into the pilot DB
 
@@ -229,16 +338,17 @@ def run_query(db: Session, qdef: dict, *, offline: bool = True) -> QueryRecord:
     results = [_result_row(x) for x in r["connections"]["results"]]
     near = [_result_row(x) for x in r["connections"]["near_matches"]]
 
-    audit_changes: list[dict] = []
-    for x in r["connections"]["results"]:
-        dec = x.get("audit_decision")
-        if dec and dec != "approved":
-            audit_changes.append({
-                "person_id": x["person_id"], "name": x.get("name"),
-                "transition": f"{x.get('qualification')}::{dec}",
-                "reason": x.get("audit_reason"), "issues": x.get("audit_issues", []),
-            })
+    tally = {b: 0 for b in _TRANSITION_BUCKETS}
+    for t in audit_transitions:
+        tally[t["bucket"]] = tally.get(t["bucket"], 0) + 1
+    audit_changes = [
+        {"person_id": t["person_id"], "transition": t["bucket"], "decision": t["audit_decision"],
+         "reason": t["reason"], "issues": t["issues"]}
+        for t in audit_transitions
+        if t["bucket"] not in ("exact_to_exact", "possible_to_possible")
+    ]
 
+    fur = _final_uncertainty_rate(interp, results)
     return QueryRecord(
         query_id=qdef["id"],
         query=qdef["query"],
@@ -271,9 +381,13 @@ def run_query(db: Session, qdef: dict, *, offline: bool = True) -> QueryRecord:
         near_matches=near,
         judge_metadata=r.get("judge_metadata"),
         audit_metadata=r.get("audit_metadata"),
-        judge_trace=trace.__dict__,
+        judge_trace=trace.as_dict(),
+        audit_transitions=audit_transitions,
+        audit_transition_tally=tally,
         audit_changes=audit_changes,
-        unknown_required_rate=_unknown_required_rate(interp, results),
+        final_uncertainty_rate=fur,
+        unknown_required_rate=fur,
+        reason_generation_enabled=reasons_enabled,
         llm_provider=r.get("llm_provider"),
         llm_model=r.get("llm_model"),
     )

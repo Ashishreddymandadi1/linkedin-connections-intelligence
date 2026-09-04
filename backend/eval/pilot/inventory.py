@@ -135,3 +135,69 @@ def inventory(dataset_id: str | None = None) -> dict:
         out["company_semantics_total"] = db.execute(select(func.count()).select_from(CompanySemantic)).scalar_one()
     engine.dispose()
     return out
+
+
+def pilot_semantic_status(pilot_db_path: str) -> dict:
+    """DB-only (NO network) semantic-enrichment status of the isolated pilot DB.
+
+    Safe to run after a future live ``enrich`` to see what actually landed
+    (V4 PART 10.1 §10).
+    """
+    from pathlib import Path
+
+    from app.constants import EnrichmentState
+    from app.models import Dataset, Person, ProfileSemantic
+
+    p = Path(pilot_db_path)
+    if not p.exists():
+        return {"error": f"pilot DB not found: {p}"}
+
+    engine = create_engine(f"sqlite:///{p.as_posix()}", future=True)
+    S = sessionmaker(bind=engine, future=True)
+    tgt = settings.semantic_profile_version
+    with S() as db:
+        ds_id = db.execute(select(Dataset.id)).scalar_one_or_none()
+        people = db.execute(select(Person)).scalars().all()
+        pids = [x.id for x in people]
+        sems = db.execute(
+            select(ProfileSemantic).where(ProfileSemantic.person_id.in_(pids))
+        ).scalars().all() if pids else []
+
+        by_person = {s.person_id: s for s in sems}
+        at_target = [x for x in people if x.semantic_version == tgt]
+        missing = [x for x in people if x.semantic_version != tgt]
+
+        provider_counts: dict[str, int] = {}
+        model_counts: dict[str, int] = {}
+        for s in sems:
+            if s.version == tgt:
+                provider_counts[s.llm_provider or "unknown"] = provider_counts.get(s.llm_provider or "unknown", 0) + 1
+                model_counts[s.llm_model or "unknown"] = model_counts.get(s.llm_model or "unknown", 0) + 1
+
+        failures = [
+            {"person_id": x.id, "state": x.enrichment_state,
+             "error": (x.enrichment_error or "")[:200]}
+            for x in people
+            if x.enrichment_state in (EnrichmentState.FAILED, EnrichmentState.WAITING_FOR_FREE_LLM)
+            or x.enrichment_error
+        ]
+        stale = [x.id for x in people
+                 if x.id in by_person and by_person[x.id].version != tgt]
+        never_enriched = [x.id for x in missing if x.id not in by_person]
+    engine.dispose()
+
+    return {
+        "network": "none — DB inspection only",
+        "pilot_db": str(p),
+        "dataset_id": ds_id,
+        "pilot_profiles": len(people),
+        "target_semantic_version": tgt,
+        "at_target_semantic_version": len(at_target),
+        "missing_target_semantic_version": len(missing),
+        "semantic_rows_present": len(sems),
+        "stale_semantic_version": len(stale),        # has a row, but older version
+        "never_semantically_enriched": len(never_enriched),
+        "provider_counts_at_target": provider_counts,
+        "model_counts_at_target": model_counts,
+        "failures": failures,
+    }
