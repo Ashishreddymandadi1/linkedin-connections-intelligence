@@ -44,6 +44,7 @@ from app.services.judge_validator import validate_person
 from app.services.llm import budget as llm_budget
 from app.services.matching import company_matches, norm_company
 from app.services.person_view import education_to_out, experience_to_out, skill_to_out
+from app.services.profile_authority import current_employer_from
 from app.services.query_interpreter import interpret_query
 from app.services.reason_generator import generate_reason, generate_reasons_batch
 from app.services.scoring import ScoredCandidate, ScoringContext, load_facts, score_candidate
@@ -205,7 +206,9 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     #    for the whole top-N instead of one per candidate. Display-only: never
     #    affects ranking / qualification / score. ──────────────────────────
     llm_reason_pool = top[: settings.llm_reason_top_n] if settings.llm_reason_generation else []
-    reasons_by_id = generate_reasons_batch(llm_reason_pool, query) if llm_reason_pool else {}
+    reasons_by_id = (
+        generate_reasons_batch(llm_reason_pool, query, facts_by_id=facts_by_id) if llm_reason_pool else {}
+    )
 
     results: list[SearchResultItem] = []
     for rank, cand in enumerate(top, start=1):
@@ -213,6 +216,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         item = _to_result_item(
             db, rank, cand, parsed, query, reason=reason,
             audit=audit_by_id.get(cand.person.id),
+            facts=facts_by_id.get(cand.person.id),
         )
         results.append(item)
         repo.add_search_result(
@@ -229,7 +233,8 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
             continue
         seen_near.add(cand.person.id)
         near_reason = generate_reason(cand, query, allow_llm=False)
-        item = _to_result_item(db, len(near_items) + 1, cand, parsed, query, reason=near_reason)
+        item = _to_result_item(db, len(near_items) + 1, cand, parsed, query, reason=near_reason,
+                               facts=facts_by_id.get(cand.person.id))
         near_items.append(item)
         # near matches persist in their OWN bucket — same schema, qualification
         # stays not_match, never mixed into the main results (V4 PART 7 §4).
@@ -521,6 +526,7 @@ def _to_result_item(
     *,
     reason: str,
     audit: dict | None = None,
+    facts=None,
 ) -> SearchResultItem:
     p = cand.person
 
@@ -537,7 +543,11 @@ def _to_result_item(
     )
     edu_terms = _terms(CriterionType.EDUCATION)
 
-    exps = repo.get_experiences(db, p.id)
+    # hardening PART 13 — the SAME experiences list scoring/judge/audit already
+    # bulk-loaded, so the current-employer name shown here can never disagree
+    # with what they used (no separate per-candidate re-fetch).
+    exps = facts.experiences if facts is not None else repo.get_experiences(db, p.id)
+    current_company = current_employer_from(p, exps)
     rel_exp = [
         experience_to_out(e)
         for e in exps
@@ -568,7 +578,7 @@ def _to_result_item(
         linkedin_url=p.linkedin_url,
         profile_picture_url=p.profile_picture_url,
         current_title=p.current_title,
-        current_company=p.current_company,
+        current_company=current_company,
         location=p.location_text,
         is_connection=True,
         match_score=cand.match_score,

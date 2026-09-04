@@ -36,8 +36,13 @@ export function ResultCard({
   const isNear = variant === "near";
   const showNeedsVerification =
     !isNear && item.qualification === "possible_match" && item.uncertain_criteria.length > 0;
+  // The displayed badge is the FINAL applied qualification, computed from the
+  // same audit outcome. Never surface audit doubt text next to an Exact match
+  // badge — that reads as the badge and the audit disagreeing.
   const showAuditDetail =
-    !isNear && (item.audit_decision === "downgrade" || item.audit_decision === "unknown");
+    !isNear &&
+    item.qualification !== "exact_match" &&
+    (item.audit_decision === "downgrade" || item.audit_decision === "unknown");
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-card shadow-card">

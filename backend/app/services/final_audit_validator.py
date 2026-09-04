@@ -180,14 +180,20 @@ def validate_audit(
                     first_pass_qualification=first_pass_qualification)
 
     # ── decision adjustments (§2/§11) ───────────────────────────────
-    if decision == AuditDecision.INCORRECT and not grounded_fail:
+    # A grounded 'unsupported' required review is a verified required-FALSE —
+    # it ALWAYS means NOT_MATCH (§12: "required FALSE -> NOT_MATCH"), regardless
+    # of what decision label the model attached. Applying this unconditionally
+    # (not just when the model said APPROVED) keeps the badge and the audit
+    # decision from ever disagreeing.
+    if grounded_fail:
+        if decision != AuditDecision.INCORRECT:
+            notes.append(f"decision overridden -> INCORRECT: a required criterion review is a "
+                         f"grounded 'unsupported' ({', '.join(grounded_fail)})")
+        decision = AuditDecision.INCORRECT
+    elif decision == AuditDecision.INCORRECT:
         decision = AuditDecision.UNKNOWN
         notes.append("INCORRECT not grounded (no grounded 'unsupported' required review, no "
                      "deterministic contradiction) — downgraded to UNKNOWN")
-    if decision == AuditDecision.APPROVED and grounded_fail:
-        decision = AuditDecision.DOWNGRADE
-        notes.append("APPROVED overridden -> DOWNGRADE: a required criterion review is a "
-                     "grounded 'unsupported'")
     if decision == AuditDecision.APPROVED and (missing_required_reviews or not required_supported_ok):
         decision = AuditDecision.UNKNOWN
         notes.append("APPROVED requires a grounded 'supported' review for EVERY required "

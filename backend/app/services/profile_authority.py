@@ -62,6 +62,26 @@ def current_employer_known(facts) -> bool:
     )
 
 
+def current_employer_from(person, experiences) -> str | None:
+    """The ONE authoritative current-employer name (hardening PART 13).
+
+    A normalized experience row flagged ``is_current`` is the verified, backend-
+    maintained fact — it wins over the denormalized ``Person.current_company``
+    scrape field, which can go stale relative to enrichment/re-scrapes. Every
+    caller that shows or reasons about "current employer" (scoring, the judge/
+    audit packet, the API response, reason generation) MUST go through this (or
+    ``current_employer``) so they can never disagree with each other."""
+    for e in experiences or []:
+        if getattr(e, "is_current", False) and getattr(e, "company_name", None):
+            return e.company_name
+    return getattr(person, "current_company", None)
+
+
+def current_employer(facts) -> str | None:
+    """``current_employer_from`` for a ``ProfileFacts``-shaped object."""
+    return current_employer_from(facts.person, getattr(facts, "experiences", None))
+
+
 def location_known(facts) -> bool:
     p = facts.person
     return bool(

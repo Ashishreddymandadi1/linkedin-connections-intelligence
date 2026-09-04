@@ -109,6 +109,27 @@ describe("ResultCard", () => {
     expect(screen.queryByText("Final audit verified")).not.toBeInTheDocument();
   });
 
+  it("never shows audit doubt text next to an Exact match badge", () => {
+    // hardening PART 12: the badge is the FINAL applied qualification. Even
+    // when the audit's own decision label is "unknown" (e.g. because facts
+    // alone already proved every required criterion), the doubt text must not
+    // be shown next to an Exact match badge — badge and audit text must never
+    // visibly disagree.
+    render(
+      <ResultCard
+        item={make({
+          qualification: "exact_match",
+          audit_decision: "unknown",
+          audit_issues: ["some validator note"],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText("Jane Smith"));
+    expect(screen.getByText("Exact match")).toBeInTheDocument();
+    expect(screen.queryByText("Uncertain")).not.toBeInTheDocument();
+    expect(screen.queryByText("some validator note")).not.toBeInTheDocument();
+  });
+
   it("renders a near match with its missing requirement and no verified badge", () => {
     render(
       <ResultCard
