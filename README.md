@@ -1,13 +1,23 @@
 # LinkedIn Connections Intelligence
 
-Upload your LinkedIn Connections CSV → enrich every connection with Apify HarvestAPI
-profile data → search your network in plain English and get the **Top 20 matching
-people you already know**, each with an evidence-backed 0–100 match score, a grounded
-reason, exact supporting evidence, and a **separate** data-confidence score.
+Upload your LinkedIn Connections CSV -> enrich every connection with Apify HarvestAPI
+profile data -> search your network in plain English and get the **Top 20 matching
+people you already know**, each tagged Exact / Possible / Near match with an
+evidence-backed 0-100 match score, a grounded reason, exact supporting evidence, and a
+**separate** data-confidence score.
 
-Built to minimise cost: the `$4 / 1,000` HarvestAPI *profile details – no email* tier,
-free LLMs only (Groq → Groq → OpenRouter), and **local** `sentence-transformers`
-embeddings. `ENABLE_PAID_LLM=false` is enforced — no paid model is ever called.
+## How the three layers divide the work
+
+| Layer | Owns |
+|---|---|
+| **Apify** | Gets LinkedIn profile *facts* — employer, title, dates, education, location, skills. Runs ONLY during enrichment, never during search. |
+| **Anthropic** | The primary intelligence layer — understands profile *meaning* (semantic enrichment) and *search intent* (query interpretation, ambiguous-case judging, a final correctness audit, display reasons). Never overrides a verified fact. |
+| **Python (this backend)** | Owns factual truth, chronology, qualification, and the numeric score. Every LLM judgment is validated against real evidence before it can change a result — an invalid or hallucinated reference is rejected, not trusted. |
+
+Anthropic is the primary provider once `ANTHROPIC_API_KEY` is set (see **Setup**
+below) — it is a **paid** API. Optional free fallbacks (Groq, OpenRouter) and a fully
+deterministic fallback exist for every LLM step, so the app still works with no LLM key
+at all, just with less semantic nuance.
 
 ## Stack
 
@@ -15,90 +25,150 @@ embeddings. `ENABLE_PAID_LLM=false` is enforced — no paid model is ever called
 |---|---|
 | Backend | Python 3.11 · FastAPI · Pydantic v2 · SQLAlchemy 2 · SQLite (Postgres-ready via `DATABASE_URL`) |
 | Frontend | Vite · React · TypeScript · Tailwind · TanStack Query |
-| Profile data | Apify actor `harvestapi/linkedin-profile-scraper` (`LpVuK3Zozwuipa5bp`), *Profile details no email* |
-| LLM | Groq `openai/gpt-oss-120b` → `openai/gpt-oss-20b` → OpenRouter `:free` → queue (`WAITING_FOR_FREE_LLM`) |
-| Embeddings | `sentence-transformers/all-MiniLM-L6-v2`, local, numpy brute-force cosine |
+| Profile data | Apify actor `harvestapi/linkedin-profile-scraper` (`LpVuK3Zozwuipa5bp`), *Profile details no email* — never enables email search, never switches to a costlier mode |
+| LLM | Anthropic (primary, paid) -> Groq -> OpenRouter (`:free`) -> deterministic fallback, per step |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2`, local, numpy brute-force cosine — no key, no cost |
 
-## Run it
+## Setup
 
 ```bash
-# backend  →  http://localhost:8010   (docs at /docs)
+git clone <this repo>
+cd linkedin-connections-intelligence
+cp .env.example backend/.env
+```
+
+Edit `backend/.env` and set, at minimum:
+
+```
+APIFY_API_TOKEN=...       # https://console.apify.com/account/integrations
+ANTHROPIC_API_KEY=...     # https://console.anthropic.com/settings/keys
+USE_FIXTURES=false        # false = real Apify enrichment
+```
+
+A normal Anthropic API key works as-is — `ANTHROPIC_WORKSPACE_ID` is only needed for
+an identity-linked key tied to multiple workspaces, and `ENABLE_PAID_LLM` is a
+deprecated no-op kept for old `.env` files (a configured `ANTHROPIC_API_KEY` **is** the
+opt-in). `GROQ_API_KEY` / `OPENROUTER_API_KEY` are optional free fallbacks.
+
+`backend/.env` is gitignored and must never be committed — the app reads secrets only
+from that local file / real environment variables, never from source.
+
+### Run it
+
+```bash
+.\run.ps1          # Windows: creates backend/.venv, installs both sides, starts both
+```
+
+or manually:
+
+```bash
+# backend  ->  http://localhost:8010   (docs at /docs)
 cd backend
 py -3.11 -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
-cp ../.env.example .env          # then fill APIFY_API_TOKEN + GROQ_API_KEY
 .venv/Scripts/python -m uvicorn app.main:app --port 8010
 ```
 
 ```bash
-# frontend  →  http://localhost:5182   (proxies /api/* → :8010)
+# frontend  ->  http://localhost:5182   (proxies /api/* -> :8010)
 cd frontend
 npm install
 npm run dev
 ```
 
-Or use `run.ps1` from the repo root to start both.
+Then open **http://localhost:5182**, upload your `Connections.csv`, click **Enrich**,
+and search.
 
-## How it works
+## Enrichment call flow (one-time per connection, cached)
 
 ```
-CSV → parse (skip export preamble) → canonicalize URLs → dedupe by public id
-    → dataset + people (is_connection=true)
-    → enrichment worker (resumable, batched): Apify → raw_profiles (verbatim)
-      → deterministic normalize → experiences/education/skills + completeness
-      → free-LLM semantic pass (seniority, domains, inferred skills w/ evidence)
-      → local embedding
-    → NL query → LLM (or deterministic) → weighted criteria (Σ = 100)
-      → candidate pool (SQL + embeddings, no Apify) → deterministic scoring
-      → Top 20 connections, each with score breakdown + evidence + data confidence
+CSV -> parse (skip export preamble) -> canonicalize URLs -> dedupe by public id
+    -> dataset + people (is_connection=true)
+    -> enrichment worker (resumable, batched):
+         Apify -> raw_profiles (verbatim)
+         -> deterministic normalize -> experiences/education/skills + completeness
+         -> Anthropic semantic pass (role/industry meaning, leadership/mentoring
+            signals, inferred skills w/ evidence) — cached by semantic_profile_version;
+            re-run only if the raw profile materially changed or the version bumps.
+            An Anthropic failure NEVER re-triggers Apify — the scrape stays, semantics
+            are retried later.
+         -> cached company classification (once per employer, reused by every
+            person who worked there — never one call per person)
+         -> local embedding
+         -> READY
 ```
 
-Scoring is done **in code** — the LLM only turns the deterministic evidence into a
-sentence and may not add claims. Fact vs. AI-inferred is shown distinctly in the UI.
+## Search call flow (every query, budget-aware)
+
+```
+query
+  -> Anthropic query interpretation (or deterministic parser)
+  -> full local scan of every connection (<= FULL_SCAN_MAX_CONNECTIONS)
+  -> hard-fact viability gate (verified contradictions only)
+  -> local pre-score: stored facts + cached company classification + stored
+     ProfileSemantic (role/industry/leadership signals) resolve MOST candidates
+     to TRUE/FALSE without any query-time LLM call
+  -> Anthropic semantic judge — ONLY for candidates with a genuinely unresolved
+     REQUIRED semantic criterion; batched, with adaptive splitting if a batch's
+     response is truncated (never a blind identical retry)
+  -> fact-consistency validator (every verdict checked against real evidence
+     before it can change a result)
+  -> deterministic rescore -> qualification (Exact / Possible / Not Match)
+  -> cross-encoder rerank within tiers
+  -> final Anthropic audit over the shown pool (batched) — can downgrade or
+     remove, never invents a fact, never promotes Possible -> Exact
+  -> ONE batched Anthropic call writes the display reasons for the top results
+  -> persisted Top 20 + near matches
+```
+
+Search **never** calls Apify. A saved search reload **never** re-runs any LLM,
+embedding, judge, or audit step — it replays the exact response that was first
+returned.
+
+Because most candidates are already decided from stored facts and semantics, a
+~1,000-connection network does **not** turn a broad query into ~100 Anthropic calls —
+only the genuinely ambiguous candidates reach the judge. An optional
+`SEARCH_LLM_MAX_CALLS` soft budget can cap query-time LLM spend further; if it's hit,
+deterministic results still stand and the UI marks verification as partial — it never
+silently pretends a review was complete.
 
 ## Cost
 
-~300 connections ≈ **one-time $1.20** on Apify (fixture mode during development is $0).
-The external "Expand beyond my connections" search is **not** in this build (inert
-hooks are in place for it).
+Apify: pay-per-event, ~`$0.004`/profile (`$4` per 1,000) on the *Profile details – no
+email* tier — a one-time cost per connection, re-used until `PROFILE_TTL_DAYS` expires.
+Fixture mode (`USE_FIXTURES=true`, what the automated tests always use) is $0.
+
+Anthropic: paid, billed by Anthropic per the model in `ANTHROPIC_MODEL`. Actual spend
+depends on network size and query breadth; see `SEARCH_LLM_MAX_CALLS` above to cap it,
+and `backend/eval/pilot/` for an offline harness that estimates call counts before any
+live run. Optional `GROQ_API_KEY` / `OPENROUTER_API_KEY` fallbacks are free-tier.
 
 ## Tests
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest      # 59 tests
-cd frontend && npm test                            # 2 tests
+cd backend && .venv/Scripts/python -m pytest
+cd frontend && npm test -- --run
+cd frontend && npx tsc --noEmit
 ```
 
-## Doing the real run (your ~240 connections)
+No test suite makes a live Apify or LLM call — every provider is mocked or disabled.
 
-**Apify credit first.** The scraper is pay-per-event ($0.004/profile). Check
-`https://console.apify.com/billing` — the Free plan gives **$5/month** of usage that
-resets on your billing-cycle date. ~240 profiles ≈ **$0.96**, so the free credit
-covers a full run *if* it hasn't already been spent this cycle. If usage is near $5,
-either wait for the reset or add a pay-as-you-go card.
+## Resuming an interrupted enrichment run
 
-1. In `backend/.env`: `USE_FIXTURES=false`, keep `DEVELOPMENT_BATCH_SIZE=5` /
-   `ENVIRONMENT=development` for the first pass. Optionally set
-   `APIFY_MAX_CHARGE_USD=2` as a hard stop.
-2. Start backend + frontend, open http://localhost:5182, upload your `Connections.csv`.
-3. Enrichment runs in resumable batches. If the free **Groq** quota runs out mid-run,
-   the semantic step is skipped for the rest of the run (profiles still get scraped,
-   normalized, embedded and marked READY). Click **Resume** later and it runs a
-   `backfill_semantics` pass — nothing is re-scraped.
-4. Bump `ENVIRONMENT=production` (batch size 50) once the first batches look good.
-5. Refresh a stale profile from its page; `PROFILE_TTL_DAYS=30` guards re-scrapes.
+Enrichment is resumable and batched. If the LLM quota / budget runs out mid-run, the
+semantic step is deferred for the rest of the run — profiles are still scraped,
+normalized, embedded, and marked READY. Click **Resume** later; it runs a
+`backfill_semantics` pass for anyone still missing the current semantic version —
+nothing is ever re-scraped just because semantics failed.
 
 `scripts/reset_dataset.py <dataset_id>` wipes a dataset's derived data back to PENDING
 (keeps the CSV rows) if a run went wrong.
 
-> Note on latency: when the shared Groq free tier is rate-limited, query
-> interpretation and reason generation fall back to `gpt-oss-20b` and then to
-> deterministic templates — correct, just slower. Add `OPENROUTER_API_KEY` to widen
-> free capacity.
-
 ## Config knobs (`.env`)
 
-`USE_FIXTURES` · `ENVIRONMENT` · `DEVELOPMENT_BATCH_SIZE` / `APIFY_PROFILE_BATCH_SIZE`
-· `MAX_APIFY_RETRIES` · `LLM_MAX_RETRIES` · `PROFILE_TTL_DAYS` · `CANDIDATE_POOL_SIZE`
-· `TOP_CONNECTIONS` · `MIN_MATCH_SCORE` · `SEMANTIC_ENABLED` · `LLM_QUERY_INTERPRETATION`
-· `LLM_REASON_GENERATION` · `EMBEDDINGS_ENABLED` · `ENABLE_PAID_LLM` (must stay `false`).
+See `.env.example` for the full, commented list. Notable ones:
+
+`USE_FIXTURES` · `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_WORKSPACE_ID` ·
+`GROQ_API_KEY` / `OPENROUTER_API_KEY` (optional fallbacks) · `SEARCH_LLM_MAX_CALLS` ·
+`SEMANTIC_JUDGE_MODE` · `FINAL_RESULT_AUDIT_ENABLED` · `TOP_CONNECTIONS` ·
+`CANDIDATE_POOL_SIZE` · `MIN_MATCH_SCORE` · `EMBEDDINGS_ENABLED` · `PROFILE_TTL_DAYS`.
