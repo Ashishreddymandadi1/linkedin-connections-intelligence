@@ -110,6 +110,9 @@ class AuditMetadata:
     #: hardening PART 3 — shared adaptive-split behaviour with the judge.
     truncations: int = 0
     adaptive_splits: int = 0
+    #: hardening PART 14 — the search deadline was reached mid-run; some
+    #: batches were never attempted (their candidates fall back to UNKNOWN).
+    deadline_reached: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -131,6 +134,7 @@ class AuditMetadata:
             "models": self.models,
             "truncations": self.truncations,
             "adaptive_splits": self.adaptive_splits,
+            "deadline_reached": self.deadline_reached,
         }
 
 
@@ -149,6 +153,7 @@ def run_final_audit(
     ctx,
     *,
     bundle_by_id: dict,
+    deadline=None,
 ) -> AuditRun:
     """``audit_pool``: the tier-sorted ``ScoredCandidate`` list (TOP_N + BUFFER).
     ``bundle_by_id``: person_id -> (person, ProfileFacts, extras)."""
@@ -181,6 +186,11 @@ def run_final_audit(
 
     decisions: dict[str, dict] = {}
     for batch in batches:
+        if deadline is not None and deadline.expired():
+            meta.deadline_reached = True
+            log.warning("audit: search deadline reached — remaining batches skipped, "
+                       "their candidates fall back to UNKNOWN")
+            break
         leaves, stats = run_adaptive(batch, lambda pkts: _call_audit(payload, pkts, first_pass_by_id, parsed))
         meta.batch_count += stats.batches_attempted
         meta.successful_batches += stats.successful_batches

@@ -128,6 +128,9 @@ class JudgeMetadata:
     #: for, vs judge_candidate_count * len(judgeable_criteria) which is what
     #: would have been sent before per-criterion filtering.
     judgeable_criteria_sent: int = 0
+    #: hardening PART 14 — the search deadline was reached mid-run; some
+    #: batches were never attempted (their candidates fall back to UNKNOWN).
+    deadline_reached: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -155,6 +158,7 @@ class JudgeMetadata:
             "candidates_decided_locally": self.candidates_decided_locally,
             "candidates_needing_llm": self.candidates_needing_llm,
             "judgeable_criteria_sent": self.judgeable_criteria_sent,
+            "deadline_reached": self.deadline_reached,
         }
 
 
@@ -215,6 +219,7 @@ def run_judge(
     pool_size: int,
     hard_rejected_count: int,
     local_scored: dict | None = None,
+    deadline=None,
 ) -> JudgeRun:
     """``bundle``: ``[(person, ProfileFacts, {"volunteering":[...], "recommendations":[...]})]``
     — the candidates that passed the hard-fact gate."""
@@ -291,6 +296,11 @@ def run_judge(
 
     verdicts: dict[str, dict[str, dict]] = {}
     for batch in batches:
+        if deadline is not None and deadline.expired():
+            meta.deadline_reached = True
+            log.warning("judge: search deadline reached — %d/%d batches skipped, "
+                        "their candidates fall back to UNKNOWN", len(batches) - meta.judge_batch_count, len(batches))
+            break
         leaves, stats = run_adaptive(batch, lambda pkts: _call_judge(payload, pkts, unresolved_by_person))
         meta.judge_batch_count += stats.batches_attempted
         meta.judge_successful_batches += stats.successful_batches
@@ -310,7 +320,9 @@ def run_judge(
 
     _fill_missing(verdicts, packets_by_id, jcrits, meta)
 
-    if meta.judge_successful_batches == 0:
+    if meta.deadline_reached:
+        meta.judge_status = JudgeStatus.PARTIAL
+    elif meta.judge_successful_batches == 0:
         meta.judge_status = JudgeStatus.UNAVAILABLE
     elif meta.judge_failed_batches or meta.omitted_people or meta.omitted_criteria:
         meta.judge_status = JudgeStatus.PARTIAL

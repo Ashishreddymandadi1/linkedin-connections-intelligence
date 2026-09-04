@@ -382,6 +382,39 @@ def test_partial_audit_failure_does_not_crash(monkeypatch):
     assert all(run.decisions[pid]["decision"] == AuditDecision.UNKNOWN for pid in unaudited)
 
 
+# ─────────────────────── hardening PART 14 — search deadline ───────────────────────
+
+
+class _FakeDeadline:
+    def __init__(self, expire_after: int):
+        self.calls = 0
+        self.expire_after = expire_after
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after
+
+
+def test_deadline_reached_stops_further_audit_batches(monkeypatch):
+    monkeypatch.setattr(final_auditor.settings, "final_result_audit_enabled", True)
+    monkeypatch.setattr(final_auditor.settings, "final_result_audit_batch_size", 10)
+    monkeypatch.setattr(final_auditor, "_call_audit", _fake_audit({}))
+
+    plan = _plan(_crit(id="c", type=CriterionType.PROFESSIONAL_CONCEPT, concept="x", required=True))
+    pool = _pool(30)
+    bundle_by_id = {sc.person.id: (sc.person, _pf(sc.person, [_Exp("E", "C", 2020, None, True, id="cur")]),
+                                   {"volunteering": [], "recommendations": []}) for sc in pool}
+    run = final_auditor.run_final_audit("q", plan, pool, ScoringContext(), bundle_by_id=bundle_by_id,
+                                        deadline=_FakeDeadline(1))
+
+    assert run.metadata.deadline_reached is True
+    assert run.metadata.status == AuditStatus.PARTIAL
+    assert run.metadata.successful_batches == 1
+    unaudited = [pid for pid, d in run.decisions.items() if d.get("audit_missing")]
+    assert len(unaudited) == 20
+    assert all(run.decisions[pid]["decision"] == AuditDecision.UNKNOWN for pid in unaudited)
+
+
 # ─────────────────────── §40 — oversized audit packet ───────────────────────
 
 

@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     #: hit, remaining optional work is skipped, deterministic results stand, and
     #: unresolved conditions stay UNKNOWN with judge/audit status PARTIAL.
     search_llm_max_calls: int = 0
+    #: hardening PART 14 — wall-clock budget for a search's OPTIONAL LLM work
+    #: (judge + audit + reason generation). Deterministic scoring is never
+    #: skipped for time. <= 0 disables the deadline (unlimited).
+    search_max_seconds: float = 45.0
 
     # ── Search quality v2 ────────────────────────────────────
     relevance_weight: float = 20.0         # points reserved for whole-profile relevance

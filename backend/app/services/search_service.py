@@ -40,6 +40,7 @@ from app.schemas import (
 )
 from app.services.candidate_gate import hard_gate
 from app.services.candidate_pool import get_candidates
+from app.services.deadline import Deadline
 from app.services.judge_validator import validate_person
 from app.services.llm import budget as llm_budget
 from app.services.matching import company_matches, norm_company
@@ -64,6 +65,9 @@ def _tier_key(s):
 
 def run_connection_search(db: Session, *, dataset_id: str, query: str) -> SearchResponse:
     llm_budget.clear_budget()  # defensive — a prior request on a reused thread must never leak in
+    # hardening PART 14 — wall-clock budget for OPTIONAL LLM work (judge / audit
+    # / reason). Deterministic scoring below is never skipped for time.
+    deadline = Deadline(settings.search_max_seconds)
     parsed, provider, model = interpret_query(query)
     log.info("query %r -> %d criteria (intent=%s) via %s",
              query, len(parsed.criteria), parsed.intent, provider)
@@ -122,6 +126,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
         query, parsed, bundle, ctx,
         network_size=total, pool_size=len(candidates),
         hard_rejected_count=len(hard_rejected), local_scored=prescored,
+        deadline=deadline,
     )
 
     # ── validate every verdict before it can change a score (§17) ────
@@ -179,7 +184,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     #    candidates drop out; the un-audited tail is kept only for the counts and
     #    is NEVER promoted into the shown results (§3/§23). ────────────────────
     audit_run, audit_by_id, survivors, tail = _run_final_audit(
-        db, query, parsed, scored, near_pool, ctx, facts_by_id, vol_by_id, rec_by_id,
+        db, query, parsed, scored, near_pool, ctx, facts_by_id, vol_by_id, rec_by_id, deadline,
     )
     scored = survivors + tail
 
@@ -205,7 +210,12 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     # ── batched display-reason generation (hardening PART 10) — ONE LLM call
     #    for the whole top-N instead of one per candidate. Display-only: never
     #    affects ranking / qualification / score. ──────────────────────────
-    llm_reason_pool = top[: settings.llm_reason_top_n] if settings.llm_reason_generation else []
+    # skip the LLM reason path once the deadline is spent — a name/company/skill
+    # deterministic template still explains every result, it just isn't prose.
+    llm_reason_pool = (
+        top[: settings.llm_reason_top_n]
+        if settings.llm_reason_generation and not deadline.expired() else []
+    )
     reasons_by_id = (
         generate_reasons_batch(llm_reason_pool, query, facts_by_id=facts_by_id) if llm_reason_pool else {}
     )
@@ -260,6 +270,7 @@ def run_connection_search(db: Session, *, dataset_id: str, query: str) -> Search
     llm_calls["total"] = calls_interpretation + llm_calls["semantic_judge"] \
         + llm_calls["final_audit"] + reason_calls
     llm_calls["budget"] = {"max_calls": settings.search_llm_max_calls, "used_after_interpretation": llm_budget.used()}
+    llm_calls["deadline"] = deadline.as_dict()
     llm_budget.clear_budget()
 
     # FINAL validated search-level snapshot (V4 PART 7 §3) — captured here, AFTER
@@ -362,7 +373,7 @@ def _item_from_payload(payload: dict) -> SearchResultItem:
 # ─────────────────────── final audit (V4 PART 5) ───────────────────────
 
 
-def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol_by_id, rec_by_id):
+def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol_by_id, rec_by_id, deadline=None):
     """Returns ``(audit_run | None, audit_by_id, survivors_sorted, tail)``.
 
     Audits the TOP_N + BUFFER pool in ONE batched pass, validates every decision,
@@ -388,7 +399,7 @@ def _run_final_audit(db, query, parsed, scored, near_pool, ctx, facts_by_id, vol
         )
         for c in audit_pool if c.person.id in facts_by_id
     }
-    audit_run = run_final_audit(query, parsed, audit_pool, ctx, bundle_by_id=bundle_by_id)
+    audit_run = run_final_audit(query, parsed, audit_pool, ctx, bundle_by_id=bundle_by_id, deadline=deadline)
 
     survivors: list[ScoredCandidate] = []
     audit_by_id: dict[str, dict] = {}

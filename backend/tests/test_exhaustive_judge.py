@@ -177,6 +177,52 @@ def test_all_batches_fail_is_unavailable_not_a_crash(monkeypatch):
     assert all(v["mentor_evidence"]["status"] == TriState.UNKNOWN for v in run.verdicts.values())
 
 
+# ─────────────────────── hardening PART 14 — search deadline ───────────────────────
+
+
+class _FakeDeadline:
+    """Expires starting from the (expire_after + 1)-th check — one check happens
+    per batch iteration, right before that batch would be attempted."""
+
+    def __init__(self, expire_after: int):
+        self.calls = 0
+        self.expire_after = expire_after
+
+    def expired(self) -> bool:
+        self.calls += 1
+        return self.calls > self.expire_after
+
+
+def test_deadline_reached_stops_further_batches_and_marks_partial(monkeypatch):
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_batch_size", 10)
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge())
+
+    run = semantic_judge.run_judge(
+        "x", _mentor_plan(), _bundle(100), ScoringContext(),
+        network_size=100, pool_size=100, hard_rejected_count=0,
+        deadline=_FakeDeadline(3),
+    )
+    assert run.metadata.deadline_reached is True
+    assert run.metadata.judge_status == JudgeStatus.PARTIAL
+    assert run.metadata.judge_batch_count == 3
+    judged = [pid for pid, v in run.verdicts.items() if not v["mentor_evidence"].get("judge_missing")]
+    unjudged = [pid for pid, v in run.verdicts.items() if v["mentor_evidence"].get("judge_missing")]
+    assert len(judged) == 30 and len(unjudged) == 70
+    assert all(run.verdicts[pid]["mentor_evidence"]["status"] == TriState.UNKNOWN for pid in unjudged)
+
+
+def test_no_deadline_never_stops_a_run(monkeypatch):
+    """deadline=None (the default) — behaves exactly as if the deadline never existed."""
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_mode", "all_viable")
+    monkeypatch.setattr(semantic_judge.settings, "semantic_judge_batch_size", 10)
+    monkeypatch.setattr(semantic_judge, "_call_judge", _fake_judge())
+    run = semantic_judge.run_judge("x", _mentor_plan(), _bundle(30), ScoringContext(),
+                                   network_size=30, pool_size=30, hard_rejected_count=0)
+    assert run.metadata.deadline_reached is False
+    assert run.metadata.judge_status == JudgeStatus.FULL
+
+
 # ─────────────────────── §53 — missing person / criterion ───────────────────────
 
 
